@@ -1,0 +1,83 @@
+# SkillBridge workflow orchestrator
+
+`skillbridge/orchestrator.py` is deterministic workflow infrastructure, not a fourth
+specialized AI agent. It sends versioned `AgentRequestMessage` messages to the three
+specialized agents using the installed uAgents `Context.send_and_receive` API.
+`agents/orchestrator_agent.py` is the separate standalone Agentverse deployment for
+users who want to chat through Agent Chat Protocol; it gathers explicit candidate
+details with ASI:One and coordinates those same three agents.
+
+Configure the three deployed agent addresses before starting the orchestrator:
+
+```text
+SKILLBRIDGE_OPPORTUNITY_AGENT_ADDRESS=<uAgents address>
+SKILLBRIDGE_EVIDENCE_AGENT_ADDRESS=<uAgents address>
+SKILLBRIDGE_ACTION_AGENT_ADDRESS=<uAgents address>
+```
+
+Optional workflow settings:
+
+```text
+SKILLBRIDGE_WORKFLOW_TIMEOUT=30
+SKILLBRIDGE_WORKFLOW_MAX_ATTEMPTS=2
+SKILLBRIDGE_WORKFLOW_DB=skillbridge_workflows.sqlite3
+SKILLBRIDGE_ORCHESTRATOR_SEED=<private deployment seed>
+SKILLBRIDGE_ORCHESTRATOR_PORT=8000
+```
+
+Agent addresses must be distinct valid uAgents addresses. The messages use
+uAgents' signed-agent transport; the incoming workflow handler does not allow
+unverified messages. Keep seeds and credentials in the deployment environment,
+not in this repository.
+
+An API/client sends an `AgentRequest` with `recipient="orchestrator"`,
+`message_type="candidate.workflow.run"`, a unique `request_id`, and a payload
+matching `CandidateWorkflowRequest`. The payload contains the candidate,
+`job_search` (`OpportunitySearchRequest`), declared skills, assessment,
+practical-task and project records, `as_of`, and optional matching/action
+configuration. The orchestrator evaluates candidate evidence independently of
+job search and runs those two requests concurrently. It forwards only validated
+results and optional measured improvement metadata to the Career Action Agent.
+
+Start it from the repository root with `python -m skillbridge.orchestrator`
+after installing the dependencies and setting the required addresses.
+
+Completed workflows are stored in SQLite with the job provenance and retrieval
+times, evidence profile and references, matching rubric, and action plan. The
+request body itself and credentials are not stored. Reusing the same request ID
+with the same input returns the cached result with `replayed=true`; reusing it
+with different input is rejected. Partial job-source failures remain labeled
+and are preserved in the workflow response.
+
+Configure the Opportunity Agent separately with `JOB_SOURCE=remotive` for live
+job data, or `SKILLBRIDGE_USE_FIXTURES=1` for clearly labeled development
+fixtures. The orchestrator never substitutes fixtures.
+
+## Agentverse conversational orchestrator
+
+Deploy `agents/orchestrator_agent.py` as a fourth hosted uAgent (the coordinator,
+not a fourth specialized AI agent). It registers Agent Chat Protocol handlers and
+uses ASI:One to extract only facts from the current user message. It asks for
+missing role, country, experience, learning availability, and location details;
+it then sends versioned requests to the Opportunity Intelligence, Candidate
+Evidence, and Career Action agents. Job matching and recommendations remain
+deterministic in the specialized agents. It does not cache prior recommendations
+as fresh results or replace failed live calls with fixtures.
+
+Configure these environment values/secrets on the hosted orchestrator:
+
+```text
+ASI1_API_KEY=<ASI:One API key secret>
+SKILLBRIDGE_OPPORTUNITY_AGENT_ADDRESS=<deployed Opportunity agent address>
+SKILLBRIDGE_EVIDENCE_AGENT_ADDRESS=<deployed Candidate Evidence agent address>
+SKILLBRIDGE_ACTION_AGENT_ADDRESS=<deployed Career Action agent address>
+```
+
+Optional ASI:One settings are `ASI1_BASE_URL` (defaults to
+`https://api.asi1.ai/v1`) and `SKILLBRIDGE_LLM_MODEL` (defaults to `asi1`).
+`ASI_ONE_API_KEY` is accepted as a local-development compatibility fallback;
+use Agentverse's `ASI1_API_KEY` secret for hosted deployment. The three addresses
+must be distinct valid uAgents addresses and refer to deployed, reachable agents.
+Configure the Opportunity agent itself with `JOB_SOURCE=remotive` for live jobs;
+configure each hosted agent's own seed through its deployment settings, never in
+source code. No API key is required for Remotive.

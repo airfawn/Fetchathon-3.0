@@ -356,6 +356,24 @@ class DecisionPolicy(StrictModel):
         return self
 
 
+class ASIExplanationStatus(StrEnum):
+    NOT_REQUESTED = "not_requested"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+
+
+class ASIActionSummary(StrictModel):
+    summary: NonEmptyStr = Field(max_length=1200)
+    cited_job_ids: list[NonEmptyStr] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _unique_citations(self) -> "ASIActionSummary":
+        if len(set(self.cited_job_ids)) != len(self.cited_job_ids):
+            raise ValueError("cited_job_ids must be unique")
+        return self
+
+
 class ImprovementResource(StrictModel):
     title: NonEmptyStr
     url: HttpUrl
@@ -811,6 +829,7 @@ class ActionPlanRequest(StrictModel):
     matching_config: MatchRubric = Field(default_factory=MatchRubric)
     decision_policy: DecisionPolicy = Field(default_factory=DecisionPolicy)
     improvement_metadata: list[ImprovementMetadata] = Field(default_factory=list, max_length=100)
+    include_asi_summary: bool = False
 
     @model_validator(mode="after")
     def _same_candidate(self) -> "ActionPlanRequest":
@@ -851,3 +870,11 @@ class ActionPlanResult(StrictModel):
     ranked_opportunities: list[OpportunityRecommendation]
     prioritized_improvements: list[PrioritizedImprovement] = Field(default_factory=list)
     notes: list[NonEmptyStr] = Field(default_factory=list)
+    asi_explanation_status: ASIExplanationStatus = ASIExplanationStatus.NOT_REQUESTED
+    asi_summary: ASIActionSummary | None = None
+
+    @model_validator(mode="after")
+    def _asi_summary_matches_status(self) -> "ActionPlanResult":
+        if (self.asi_explanation_status == ASIExplanationStatus.SUCCEEDED) != (self.asi_summary is not None):
+            raise ValueError("asi_summary must be set exactly when ASI explanation succeeds")
+        return self

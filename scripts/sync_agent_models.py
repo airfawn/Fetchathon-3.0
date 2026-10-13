@@ -55,7 +55,14 @@ SCHEMAS_PATH = REPO_ROOT / "skillbridge" / "schemas.py"
 TRANSPORT_PATH = REPO_ROOT / "skillbridge" / "transport.py"
 NORMALIZATION_PATH = REPO_ROOT / "skillbridge" / "normalization.py"
 SOURCE_PATHS = (SCHEMAS_PATH, NORMALIZATION_PATH, TRANSPORT_PATH)
-CANONICAL_MODULES = ("skillbridge.schemas", "skillbridge.normalization", "skillbridge.transport")
+ORCHESTRATION_PATH = REPO_ROOT / "skillbridge" / "orchestration.py"
+SOURCE_PATHS = (*SOURCE_PATHS, ORCHESTRATION_PATH)
+CANONICAL_MODULES = (
+    "skillbridge.schemas",
+    "skillbridge.normalization",
+    "skillbridge.transport",
+    "skillbridge.orchestration",
+)
 # Constants loaded from a data file; rendered as literals so hosted files need no file access.
 DATA_CONSTANTS = {"SKILL_ALIAS_DATA": REPO_ROOT / "skillbridge" / "skill_aliases.json"}
 BEGIN_MARKER = "# BEGIN GENERATED SKILLBRIDGE MODELS"
@@ -100,11 +107,32 @@ AGENT_MODELS: dict[str, tuple[str, ...]] = {
     "agents/action_agent.py": (
         "ActionPlanRequest",
         "ActionPlanResult",
+        "ASIExplanationStatus",
+        "ASIActionSummary",
         "CAREER_ACTION_MESSAGE",
         "CAREER_ACTION_RESULT_MESSAGE",
         "SkillNormalizer",
         "SKILL_ALIAS_DATA",
         "canonical_text",
+        *_TRANSPORT_NAMES,
+    ),
+    "agents/orchestrator_agent.py": (
+        "CandidateWorkflowRequest",
+        "CandidateWorkflowResult",
+        "ChatIntakeDelta",
+        "ActionPlanRequest",
+        "EvidenceProfileRequest",
+        "JobFilters",
+        "StudyPreferences",
+        "StageStatus",
+        "WorkflowStage",
+        "WorkflowStatus",
+        "OPPORTUNITY_SEARCH_MESSAGE",
+        "OPPORTUNITY_RESULT_MESSAGE",
+        "EVIDENCE_PROFILE_MESSAGE",
+        "EVIDENCE_RESULT_MESSAGE",
+        "CAREER_ACTION_MESSAGE",
+        "CAREER_ACTION_RESULT_MESSAGE",
         *_TRANSPORT_NAMES,
     ),
 }

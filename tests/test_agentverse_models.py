@@ -98,6 +98,8 @@ ACTION_PLAN_RESULT = {
     "candidate_id": "cand-1", "rubric": {}, "decision_policy": {},
     "ranked_opportunities": [],
 }
+ASI_SUMMARY = {"summary": "Apply to the listed role based on the verified evidence.",
+               "cited_job_ids": ["job-1"]}
 
 BEHAVIOR_CASES = {
     "CandidateProfile": [
@@ -126,7 +128,16 @@ BEHAVIOR_CASES = {
         ACTION_PLAN_RESULT,
         without(ACTION_PLAN_RESULT, "ranked_opportunities"),
         changed(ACTION_PLAN_RESULT, asi_summary="summary"),
+        changed(ACTION_PLAN_RESULT, asi_explanation_status="succeeded", asi_summary=ASI_SUMMARY),
+        changed(ACTION_PLAN_RESULT, asi_explanation_status="failed", asi_summary=ASI_SUMMARY),
         changed(ACTION_PLAN_RESULT, decision_policy={"apply_now_score": -1}),
+    ],
+    "ASIActionSummary": [
+        ASI_SUMMARY,
+        without(ASI_SUMMARY, "summary"),
+        changed(ASI_SUMMARY, cited_job_ids=[]),
+        changed(ASI_SUMMARY, cited_job_ids=[""]),
+        changed(ASI_SUMMARY, cited_job_ids=["job-1", "job-1"]),
     ],
     "SkillEvidence": [
         ASSESSMENT, PROJECT, SELF_REPORTED,
@@ -195,11 +206,86 @@ BEHAVIOR_CASES = {
         changed(ENVELOPE, status="error", error={"code": "", "message": "slow"}),
         changed(ENVELOPE, status="maybe"),
     ],
+    "ChatIntakeDelta": [
+        {
+            "intent": "continue", "target_role": "SOC Analyst", "country": "US",
+            "state": None, "city": "Austin", "experience_level": "entry_level",
+            "preferred_companies": None, "keywords": ["security"], "remote_only": False,
+            "learning_hours_per_week": 5, "claimed_skills": ["SIEM"],
+            "study_techniques": None, "study_notes": None, "assessments": None,
+            "practical_tasks": None, "projects": None,
+        },
+        {
+            "intent": "reset", "target_role": None, "country": None, "state": None,
+            "city": None, "experience_level": None, "preferred_companies": None,
+            "keywords": None, "remote_only": None, "learning_hours_per_week": None,
+            "claimed_skills": None, "study_techniques": None, "study_notes": None,
+            "assessments": None, "practical_tasks": None, "projects": None,
+        },
+        {
+            "intent": "continue", "target_role": "", "country": "United States",
+            "state": None, "city": None, "experience_level": "wizard",
+            "preferred_companies": None, "keywords": None, "remote_only": None,
+            "learning_hours_per_week": -1, "claimed_skills": None,
+            "study_techniques": None, "study_notes": None, "assessments": None,
+            "practical_tasks": None, "projects": None,
+        },
+        without({
+            "intent": "continue", "target_role": None, "country": None, "state": None,
+            "city": None, "experience_level": None, "preferred_companies": None,
+            "keywords": None, "remote_only": None, "learning_hours_per_week": None,
+            "claimed_skills": None, "study_techniques": None, "study_notes": None,
+            "assessments": None, "practical_tasks": None, "projects": None,
+        }, "intent"),
+    ],
 }
 
 
 OPP_REQUEST = {"target_role": "SOC Analyst", "country": "IN", "experience_level": "entry_level",
                "study_preferences": {"techniques": ["videos"], "notes": "evenings"}}
+WORKFLOW_ASSESSMENT = {
+    "record_id": "workflow-assessment-1", "candidate_id": "cand-1",
+    "skills_evaluated": ["SIEM"], "score": 0.8,
+    "taken_at": NOW.isoformat(), "provider": "controlled fixture",
+}
+WORKFLOW_REQUEST = {
+    "candidate": CANDIDATE, "job_search": OPP_REQUEST, "as_of": NOW.isoformat(),
+}
+BEHAVIOR_CASES["CandidateWorkflowRequest"] = [
+    WORKFLOW_REQUEST,
+    {**WORKFLOW_REQUEST, "assessments": [WORKFLOW_ASSESSMENT]},
+    {**WORKFLOW_REQUEST, "job_search": {**OPP_REQUEST, "target_role": "Developer"}},
+    {**WORKFLOW_REQUEST, "assessments": [WORKFLOW_ASSESSMENT, WORKFLOW_ASSESSMENT]},
+    without(WORKFLOW_REQUEST, "candidate"),
+    without(WORKFLOW_REQUEST, "as_of"),
+]
+WORKFLOW_FAILURE_RESULT = {
+    "request_id": "workflow-1", "workflow_status": "failed",
+    "opportunity_stage": {
+        "status": "failed", "error_code": "source_unavailable", "message": "All sources failed.",
+    },
+    "evidence_stage": {"status": "skipped", "message": "No workflow output was produced."},
+    "action_stage": {"status": "skipped", "message": "No validated jobs were available."},
+    "completed_at": NOW.isoformat(),
+}
+BEHAVIOR_CASES["WorkflowStage"] = [
+    {"status": "succeeded"},
+    {"status": "failed", "error_code": "timeout", "message": "Agent timed out."},
+    {"status": "failed"},
+    {"status": "skipped"},
+]
+BEHAVIOR_CASES["CandidateWorkflowResult"] = [
+    WORKFLOW_FAILURE_RESULT,
+    {**WORKFLOW_FAILURE_RESULT, "request_id": "workflow-2"},
+    without(WORKFLOW_FAILURE_RESULT, "request_id"),
+    {
+        **WORKFLOW_FAILURE_RESULT,
+        "workflow_status": "succeeded",
+        "opportunity_stage": {"status": "skipped", "message": "skipped"},
+        "evidence_stage": {"status": "skipped", "message": "skipped"},
+        "action_stage": {"status": "skipped", "message": "skipped"},
+    },
+]
 OPP_REF = {"source_id": "s", "source_url": "https://x.example.com/1", "source_job_id": "j"}
 OPP_REPORT = {"source_id": "s", "source_kind": "live", "status": "ok", "retrieved_count": 1,
               "accepted_count": 1, "rejected_count": 0, "attempts": 1}
@@ -487,6 +573,7 @@ EXPECTED_AGENT_FILES = {
     "agents/opportunity_agent.py",
     "agents/evidence_agent.py",
     "agents/action_agent.py",
+    "agents/orchestrator_agent.py",
 }
 
 
