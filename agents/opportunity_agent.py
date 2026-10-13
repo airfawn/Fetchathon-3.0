@@ -56,7 +56,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from datetime import date, timezone
 from typing import Literal, Protocol
@@ -831,6 +831,11 @@ class RemotiveSource:
         self._monotonic = monotonic
         self._cached: tuple[float, list] | None = None
 
+    def probe(self, timeout: float) -> None:
+        """Fast reachability check that doubles as the first fetch (result is cached, so a
+        healthy API is still called once)."""
+        self._all_jobs(timeout)
+
     def fetch(self, query: OpportunitySearchRequest, timeout: float) -> list[Mapping]:
         jobs = self._all_jobs(timeout)
         wanted = {w for w in canonical_text(" ".join([query.target_role, *query.filters.keywords])).split()
@@ -1155,7 +1160,8 @@ ASI1_DEFAULT_BASE_URL = "https://api.asi1.ai/v1"
 ASI1_DEFAULT_MODEL = "asi1"
 LLM_DESCRIPTION_LIMIT = 6000
 LLM_MAX_TOKENS = 4000
-LLM_CALLS_PER_SOURCE = 10
+LLM_CALLS_PER_SOURCE = 3
+LLM_BUDGET_SECONDS = 8.0  # total wall-clock for description analysis per source; hosted handlers die near 100s
 DESCRIPTION_OPEN, DESCRIPTION_CLOSE = "<<<JOB_DESCRIPTION>>>", "<<<END_JOB_DESCRIPTION>>>"
 USER_MESSAGE_OPEN, USER_MESSAGE_CLOSE = "<<<USER_MESSAGE>>>", "<<<END_USER_MESSAGE>>>"
 
@@ -1281,7 +1287,7 @@ class ASIOneClient:
 
     def __init__(self, api_key: str, base_url: str | None = None, model: str = ASI1_DEFAULT_MODEL,
                  http_post: Callable = requests.post,
-                 policy: RetryPolicy = RetryPolicy(max_attempts=2, timeout_seconds=45.0),
+                 policy: RetryPolicy = RetryPolicy(max_attempts=1, timeout_seconds=8.0),
                  sleep: Callable = time.sleep) -> None:
         if not api_key:
             raise ValueError("an ASI:One API key is required")
@@ -1527,6 +1533,7 @@ class BuildContext:
     extractor: DescriptionExtractor | None
     preferred_keys: set[str]
     llm_calls_left: int = LLM_CALLS_PER_SOURCE
+    llm_deadline: float = field(default_factory=lambda: time.monotonic() + LLM_BUDGET_SECONDS)
 
 
 def _resolve_skills(raw: RawJobRecord, ctx: BuildContext):
@@ -1556,6 +1563,9 @@ def _analyze(raw: RawJobRecord, ctx: BuildContext) -> JobAnalysis | None:
     if ctx.llm_calls_left <= 0:
         return JobAnalysis(failed=True, notes=[
             f"LLM analysis skipped: limit of {LLM_CALLS_PER_SOURCE} calls per source reached"])
+    if time.monotonic() >= ctx.llm_deadline:
+        return JobAnalysis(failed=True, notes=[
+            "LLM analysis skipped: time budget used up; related fields left unknown"])
     ctx.llm_calls_left -= 1
     return analyze_job_description(raw.description, ctx.extractor)
 
@@ -1698,6 +1708,28 @@ def deduplicate(records: list[OpportunityRecord]) -> tuple[list[OpportunityRecor
 # ------------------------------------------------------------- search workflow
 
 
+PROBE_TIMEOUT_SECONDS = 5.0
+UNREACHABLE_CODES = ("timeout", "connection_error")
+
+
+def _probe_source(source: JobSource, policy: RetryPolicy) -> RetryPolicy:
+    """Fast reachability check that is also the first attempt. Returns the policy for the remaining
+    attempts; raises at once when the API is unreachable or the failure is not retryable."""
+    probe = getattr(source, "probe", None)
+    if probe is None:
+        return policy
+    try:
+        probe(PROBE_TIMEOUT_SECONDS)
+    except ExternalCallError as error:
+        error.attempts = 1
+        if error.code in UNREACHABLE_CODES or not error.retryable or policy.max_attempts <= 1:
+            raise
+        return replace(policy, max_attempts=policy.max_attempts - 1)
+    except Exception:
+        return policy
+    return policy
+
+
 def search_opportunities(
     request: OpportunitySearchRequest,
     sources: Sequence[JobSource],
@@ -1721,17 +1753,22 @@ def search_opportunities(
     for source in sources:
         ctx = BuildContext(request, source, normalizer, vocabulary, extractor, preferred_keys)
         started = time.monotonic()
+        remaining = policy
         try:
+            remaining = _probe_source(source, policy)
+            used_by_probe = policy.max_attempts - remaining.max_attempts
             items, attempts = call_with_retries(
-                lambda: _fetch(source, request, policy), policy, sleep)
+                lambda: _fetch(source, request, remaining), remaining, sleep)
+            attempts += used_by_probe
         except ExternalCallError as error:
             reports.append(SourceReport(
                 source_id=source.source_id, source_kind=source.kind, status=SourceStatus.ERROR,
-                attempts=getattr(error, "attempts", 1), duration_ms=_elapsed_ms(started),
-                error_code=error.code, error_message=error.message))
+                attempts=getattr(error, "attempts", 1) + (policy.max_attempts - remaining.max_attempts),
+                duration_ms=_elapsed_ms(started), error_code=error.code, error_message=error.message))
             log_event("source_failed", logging.WARNING, source=source.source_id, code=error.code,
                       attempts=getattr(error, "attempts", 1))
             continue
+        ctx.llm_deadline = time.monotonic() + LLM_BUDGET_SECONDS
         retrieved_at = clock()
         built = 0
         rejects_here = 0

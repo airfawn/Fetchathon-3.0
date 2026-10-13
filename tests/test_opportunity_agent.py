@@ -462,7 +462,7 @@ def test_remotive_maps_response_with_provenance_and_no_invented_fields():
     source, calls = remotive(lambda: FakeResponse(body=remotive_body(remotive_job())))
     result = run([source])
     url, headers, timeout = calls[0]
-    assert url == "https://remotive.com/api/remote-jobs" and timeout == 10.0 and "Authorization" not in headers
+    assert url == "https://remotive.com/api/remote-jobs" and timeout == oa.PROBE_TIMEOUT_SECONDS and "Authorization" not in headers
     (record,) = result.records
     job = record.job
     assert job.source_id == "remotive" and job.job_id == "remotive:1680495" and record.source_kind == SourceKind.LIVE
@@ -528,6 +528,19 @@ def test_remotive_network_exceptions(exc, code):
 
     report = run([oa.RemotiveSource(http_get)], policy=oa.RetryPolicy(max_attempts=1)).source_reports[0]
     assert report.error_code == code
+
+
+def test_unreachable_api_fails_fast_without_retries():
+    source, calls = remotive(lambda: (_ for _ in ()).throw(requests.ConnectionError("down")))
+    report = run([source], policy=oa.RetryPolicy(max_attempts=3)).source_reports[0]
+    assert report.status == SourceStatus.ERROR and report.error_code == "connection_error"
+    assert len(calls) == 1 and report.attempts == 1
+
+
+def test_probe_counts_as_first_attempt_and_retries_use_the_rest():
+    source, calls = remotive(lambda: FakeResponse(503))
+    report = run([source], policy=oa.RetryPolicy(max_attempts=3)).source_reports[0]
+    assert len(calls) == 3 and report.attempts == 3
 
 
 def test_remotive_fetch_is_cached_to_respect_rate_limits():
@@ -707,6 +720,23 @@ def test_llm_calls_are_bounded_per_source():
     assert sum("limit" in n for r in result.records for n in r.notes) == 2
 
 
+def test_llm_time_budget_stops_enrichment_so_the_handler_cannot_hang(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(oa.time, "monotonic", lambda: now[0])
+
+    class SlowExtractor(FakeExtractor):
+        def extract(self, description):
+            now[0] += oa.LLM_BUDGET_SECONDS + 1  # one slow provider call uses the whole budget
+            return super().extract(description)
+
+    records = [raw(source_job_id=str(i), url=f"https://jobs.example.com/{i}", description=FREE_TEXT)
+               for i in range(3)]
+    extractor = SlowExtractor(analysis_json())
+    result = run([FakeSource(records)], extractor=extractor, query=make_query(filters={"max_results": 100}))
+    assert extractor.calls == 1 and len(result.records) == 3
+    assert sum("time budget" in n for r in result.records for n in r.notes) == 2
+
+
 def test_deterministic_values_win_over_llm_skills():
     extractor = FakeExtractor(analysis_json(required_skills=[
         {"skill": "Rust", "evidence_quote": "Rust"}]))
@@ -742,7 +772,7 @@ def test_asi_one_request_shape_and_reply_parsing():
     client, calls = asi_post(lambda: completion("{}"))
     assert client.extract("desc") == "{}"
     url, headers, payload, timeout = calls[0]
-    assert url == "https://api.asi1.ai/v1/chat/completions" and timeout == 45.0
+    assert url == "https://api.asi1.ai/v1/chat/completions" and timeout == 8.0
     assert headers["Authorization"] == "Bearer " + "asi-key-secret"
     assert payload["model"] == "asi1" and payload["max_tokens"] == oa.LLM_MAX_TOKENS
     fmt = payload["response_format"]
@@ -793,7 +823,7 @@ def test_asi_one_errors_are_bounded_and_typed():
     client, calls = asi_post(lambda: FakeResponse(500))
     with pytest.raises(oa.ExternalCallError) as info:
         client.extract("d")
-    assert info.value.code == "http_500" and len(calls) == 2
+    assert info.value.code == "http_500" and len(calls) == 1
     client, calls = asi_post(lambda: FakeResponse(401))
     with pytest.raises(oa.ExternalCallError) as info:
         client.extract("d")
@@ -812,7 +842,7 @@ def test_asi_one_timeout_and_connection_failures():
     client, calls = asi_post(timeout)
     with pytest.raises(oa.ExternalCallError) as info:
         client.extract("d")
-    assert info.value.code == "timeout" and len(calls) == 2
+    assert info.value.code == "timeout" and len(calls) == 1
     record = llm_record(client)
     assert any("unavailable (timeout)" in n for n in record.notes) and record.job.required_skills is None
 

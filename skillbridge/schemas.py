@@ -865,18 +865,53 @@ class ActionPlanRequest(StrictModel):
 
 CAREER_GUIDANCE_MESSAGE = "career.action.guidance"
 CAREER_GUIDANCE_RESULT_MESSAGE = "career.action.guidance.result"
+CAREER_ADVICE_MESSAGE = "career.action.advice"
+CAREER_ADVICE_RESULT_MESSAGE = "career.action.advice.result"
+
+
+def _reject_links(*values: str) -> None:
+    text = " ".join(values).lower()
+    if "http://" in text or "https://" in text or "www." in text:
+        raise ValueError("guidance must not contain links; resources are never invented")
 
 
 class GuidanceRequest(StrictModel):
-    """Role-readiness guidance request used when no validated job listings exist."""
+    """Role-readiness guidance request, independent of any job listing."""
 
     candidate: CandidateProfile
     evidence_profile: EvidenceProfileResult
+    # Short candidate-supplied summaries of their own projects (self-reported).
+    project_notes: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]] = (
+        Field(default_factory=list, max_length=10)
+    )
 
     @model_validator(mode="after")
     def _same_candidate(self) -> "GuidanceRequest":
         if self.evidence_profile.candidate_id != self.candidate.candidate_id:
             raise ValueError("evidence profile belongs to a different candidate")
+        return self
+
+
+class AdviceRequest(StrictModel):
+    """A focused question about one role (skills, certifications and/or projects).
+
+    Needs no job listing and no full intake; unknown candidate details stay None.
+    """
+
+    candidate_id: NonEmptyStr
+    target_role: NonEmptyStr = Field(max_length=120)
+    experience_level: ExperienceLevel | None = None
+    learning_hours_per_week: float | None = Field(default=None, ge=0, le=168)
+    claimed_skills: list[NonEmptyStr] = Field(default_factory=list, max_length=100)
+    project_notes: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]] = (
+        Field(default_factory=list, max_length=10)
+    )
+    topics: list[Literal["skills", "certifications", "projects"]] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def _unique_topics(self) -> "AdviceRequest":
+        if len(set(self.topics)) != len(self.topics):
+            raise ValueError("topics must be unique")
         return self
 
 
@@ -890,9 +925,32 @@ class SkillGuidance(StrictModel):
 
     @model_validator(mode="after")
     def _no_links(self) -> "SkillGuidance":
-        text = " ".join([self.why_it_matters, self.evidence_to_produce, self.completion_criteria]).lower()
-        if "http://" in text or "https://" in text or "www." in text:
-            raise ValueError("guidance must not contain links; resources are never invented")
+        _reject_links(self.why_it_matters, self.evidence_to_produce, self.completion_criteria)
+        return self
+
+
+class CertificationSuggestion(StrictModel):
+    """A commonly recognised credential for the role; not an employer requirement."""
+
+    name: NonEmptyStr = Field(max_length=120)
+    issuer: NonEmptyStr | None = Field(default=None, max_length=80)
+    why_relevant: NonEmptyStr = Field(max_length=400)
+
+    @model_validator(mode="after")
+    def _no_links(self) -> "CertificationSuggestion":
+        _reject_links(self.name, self.issuer or "", self.why_relevant)
+        return self
+
+
+class ProjectSuggestion(StrictModel):
+    title: NonEmptyStr = Field(max_length=120)
+    description: NonEmptyStr = Field(max_length=500)
+    skills_practiced: list[NonEmptyStr] = Field(min_length=1, max_length=8)
+    deliverable: NonEmptyStr = Field(max_length=300)
+
+    @model_validator(mode="after")
+    def _no_links(self) -> "ProjectSuggestion":
+        _reject_links(self.title, self.description, self.deliverable, *self.skills_practiced)
         return self
 
 
@@ -902,6 +960,8 @@ class GuidanceResult(StrictModel):
     guidance_source: Literal["model_generated_unverified"] = "model_generated_unverified"
     verified_against_job_listings: Literal[False] = False
     skills: list[SkillGuidance] = Field(max_length=6)
+    certifications: list[CertificationSuggestion] = Field(default_factory=list, max_length=4)
+    suggested_projects: list[ProjectSuggestion] = Field(default_factory=list, max_length=4)
     notes: list[NonEmptyStr] = Field(default_factory=list)
 
 

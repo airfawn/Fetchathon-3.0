@@ -213,14 +213,14 @@ BEHAVIOR_CASES = {
             "preferred_companies": None, "keywords": ["security"], "remote_only": False,
             "learning_hours_per_week": 5, "claimed_skills": ["SIEM"],
             "study_techniques": None, "study_notes": None, "assessments": None,
-            "practical_tasks": None, "projects": None,
+            "practical_tasks": None, "projects": None, "project_details": None, "question_topics": None, "question_role": None,
         },
         {
             "intent": "reset", "target_role": None, "country": None, "state": None,
             "city": None, "experience_level": None, "preferred_companies": None,
             "keywords": None, "remote_only": None, "learning_hours_per_week": None,
             "claimed_skills": None, "study_techniques": None, "study_notes": None,
-            "assessments": None, "practical_tasks": None, "projects": None,
+            "assessments": None, "practical_tasks": None, "projects": None, "project_details": None, "question_topics": None, "question_role": None,
         },
         {
             "intent": "continue", "target_role": "", "country": "United States",
@@ -228,14 +228,14 @@ BEHAVIOR_CASES = {
             "preferred_companies": None, "keywords": None, "remote_only": None,
             "learning_hours_per_week": -1, "claimed_skills": None,
             "study_techniques": None, "study_notes": None, "assessments": None,
-            "practical_tasks": None, "projects": None,
+            "practical_tasks": None, "projects": None, "project_details": None, "question_topics": None, "question_role": None,
         },
         without({
             "intent": "continue", "target_role": None, "country": None, "state": None,
             "city": None, "experience_level": None, "preferred_companies": None,
             "keywords": None, "remote_only": None, "learning_hours_per_week": None,
             "claimed_skills": None, "study_techniques": None, "study_notes": None,
-            "assessments": None, "practical_tasks": None, "projects": None,
+            "assessments": None, "practical_tasks": None, "projects": None, "project_details": None, "question_topics": None, "question_role": None,
         }, "intent"),
     ],
 }
@@ -355,6 +355,27 @@ GUIDANCE_SKILL = {
     "skill": "SIEM", "why_it_matters": "Core SOC tooling.", "evidence_to_produce": "A lab write-up.",
     "completion_criteria": "Triage three alerts.", "current_status": "no_evidence_provided",
 }
+PROJECT_DETAIL = {"name": "EDR lab", "status": "completed", "summary": "Detections", "skills_used": ["Python"],
+                  "worth": "Used by my club", "link": None}
+CERT = {"name": "CompTIA Security+", "issuer": "CompTIA", "why_relevant": "Common entry credential."}
+PROJ = {"title": "Home SIEM lab", "description": "Write detections.", "skills_practiced": ["SIEM"],
+        "deliverable": "Write-up"}
+BEHAVIOR_CASES["ProjectDetail"] = [
+    PROJECT_DETAIL, changed(PROJECT_DETAIL, status="shipped"), without(PROJECT_DETAIL, "worth"),
+    changed(PROJECT_DETAIL, name=" "),
+]
+BEHAVIOR_CASES["CertificationSuggestion"] = [
+    CERT, {"name": "CEH", "why_relevant": "Recognised."}, changed(CERT, why_relevant="See https://x.io"),
+]
+BEHAVIOR_CASES["ProjectSuggestion"] = [
+    PROJ, changed(PROJ, skills_practiced=[]), changed(PROJ, deliverable="Publish at www.example.com"),
+]
+ADVICE = {"candidate_id": "c", "target_role": "Cloud Engineer", "topics": ["projects", "certifications"]}
+BEHAVIOR_CASES["AdviceRequest"] = [
+    ADVICE, {**ADVICE, "experience_level": "student", "learning_hours_per_week": 6, "claimed_skills": ["AWS"]},
+    changed(ADVICE, topics=[]), changed(ADVICE, topics=["jobs"]), changed(ADVICE, topics=["skills", "skills"]),
+    changed(ADVICE, learning_hours_per_week=500),
+]
 BEHAVIOR_CASES["GuidanceRequest"] = [
     {"candidate": ACTION_PLAN_REQUEST["candidate"], "evidence_profile": ACTION_PROFILE},
     {"candidate": changed(ACTION_PLAN_REQUEST["candidate"], candidate_id="other"), "evidence_profile": ACTION_PROFILE},
@@ -365,7 +386,8 @@ BEHAVIOR_CASES["SkillGuidance"] = [
     changed(GUIDANCE_SKILL, current_status="verified"),
 ]
 BEHAVIOR_CASES["GuidanceResult"] = [
-    {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL]},
+    {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL],
+     "certifications": [CERT], "suggested_projects": [PROJ]},
     {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL], "verified_against_job_listings": True},
     {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL] * 7},
 ]

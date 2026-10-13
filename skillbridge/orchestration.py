@@ -60,10 +60,29 @@ class CandidateWorkflowRequest(StrictModel):
         return self
 
 
+class ProjectStatus(StrEnum):
+    IDEA = "idea"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    DEPLOYED = "deployed"
+
+
+class ProjectDetail(StrictModel):
+    """A project as the candidate describes it in chat; self-reported, never verified."""
+
+    name: NonEmptyStr = Field(max_length=120)
+    status: ProjectStatus | None
+    summary: NonEmptyStr | None = Field(max_length=500)
+    skills_used: list[NonEmptyStr] = Field(max_length=20)
+    # The candidate's own statement of its value or impact (users, results, purpose).
+    worth: NonEmptyStr | None = Field(max_length=300)
+    link: NonEmptyStr | None = Field(max_length=300)
+
+
 class ChatIntakeDelta(StrictModel):
     """Only facts explicitly present in a user chat turn; null means not supplied."""
 
-    intent: Literal["continue", "reset", "capabilities"]
+    intent: Literal["continue", "reset", "capabilities", "ask"]
     target_role: NonEmptyStr | None
     country: CountryCode | None
     state: NonEmptyStr | None
@@ -79,6 +98,10 @@ class ChatIntakeDelta(StrictModel):
     assessments: list[AssessmentRecord] | None
     practical_tasks: list[PracticalTaskRecord] | None
     projects: list[ProjectRecord] | None
+    project_details: list[ProjectDetail] | None
+    # Set only when intent is "ask": what the user wants to know, and about which role.
+    question_topics: list[Literal["skills", "certifications", "projects"]] | None
+    question_role: NonEmptyStr | None
 
 
 class WorkflowStatus(StrEnum):
