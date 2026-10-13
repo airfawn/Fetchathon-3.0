@@ -133,10 +133,45 @@ class CandidateProfile(StrictModel):
     eligibility_facts: dict[NonEmptyStr, FactValue | None] = Field(default_factory=dict)
 
 
+class EvidenceType(StrEnum):
+    SELF_REPORTED = "self_reported"
+    ASSESSMENT = "assessment"
+    PRACTICAL_TASK = "practical_task"
+    PROJECT = "project"
+
+
 class VerificationStatus(StrEnum):
     UNVERIFIED = "unverified"
     VERIFIED = "verified"
     REJECTED = "rejected"
+
+
+class SkillEvidence(StrictModel):
+    candidate_id: NonEmptyStr
+    skill_id: NonEmptyStr
+    evidence_type: EvidenceType
+    evidence_ref: NonEmptyStr | None = None
+    # Normalized result in [0, 1]; only meaningful for assessments.
+    assessment_score: float | None = Field(default=None, ge=0, le=1)
+    verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
+    recorded_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def _check_type_rules(self) -> "SkillEvidence":
+        kind = self.evidence_type
+        if kind in {EvidenceType.ASSESSMENT, EvidenceType.PRACTICAL_TASK}:
+            if self.assessment_score is None or self.evidence_ref is None:
+                raise ValueError("scored evidence requires assessment_score and evidence_ref")
+        elif self.assessment_score is not None:
+            raise ValueError("assessment_score is only valid for assessment evidence")
+        if kind == EvidenceType.PROJECT and self.evidence_ref is None:
+            raise ValueError("project evidence requires evidence_ref")
+        if (
+            kind == EvidenceType.SELF_REPORTED
+            and self.verification_status != VerificationStatus.UNVERIFIED
+        ):
+            raise ValueError("self-reported evidence cannot be marked verified or rejected")
+        return self
 
 
 class AgentName(StrEnum):
@@ -327,6 +362,9 @@ class EvidenceProfileResult(StrictModel):
     candidate_id: NonEmptyStr
     as_of: AwareDatetime
     skills: list[SkillEvidenceProfile]
+    # Flat evidence consumed by the deterministic matching rubric. Contains only
+    # records classified as supporting; raw scores/references remain traceable.
+    matching_evidence: list[SkillEvidence] = Field(default_factory=list)
     # Problems found in the supplied records (missing, mismatched, duplicate, invalid).
     issues: list[NonEmptyStr] = Field(default_factory=list)
     notes: list[NonEmptyStr] = Field(default_factory=list)
@@ -804,6 +842,40 @@ def _profile_skill(skill_id, recognized, declarations, entries, all_ids, candida
     )
 
 
+def _matching_evidence_from_profile(skills, entries, candidate_id):
+    """Expose only current supporting source records to the shared match rubric."""
+    supported_ids = {
+        reference.record_id
+        for profile in skills
+        for reference in profile.references
+        if reference.role == EvidenceRole.SUPPORTS
+    }
+    result = []
+    for record_id in sorted(supported_ids):
+        entry = entries[record_id]
+        record = entry.record
+        verified = _independently_verified(entry, candidate_id)
+        status = VerificationStatus.VERIFIED if verified else VerificationStatus.UNVERIFIED
+        for skill_id in sorted(entry.skills):
+            if entry.kind == RecordKind.ASSESSMENT:
+                result.append(SkillEvidence(
+                    candidate_id=candidate_id, skill_id=skill_id, evidence_type=EvidenceType.ASSESSMENT,
+                    evidence_ref=record_id, assessment_score=entry.score,
+                    verification_status=status, recorded_at=entry.when))
+            elif entry.kind == RecordKind.PRACTICAL_TASK:
+                if entry.score is None:
+                    continue
+                result.append(SkillEvidence(
+                    candidate_id=candidate_id, skill_id=skill_id, evidence_type=EvidenceType.PRACTICAL_TASK,
+                    evidence_ref=record_id, assessment_score=entry.score,
+                    verification_status=status, recorded_at=entry.when))
+            elif entry.kind == RecordKind.PROJECT:
+                result.append(SkillEvidence(
+                    candidate_id=candidate_id, skill_id=skill_id, evidence_type=EvidenceType.PROJECT,
+                    evidence_ref=record.reference, verification_status=status, recorded_at=entry.when))
+    return result
+
+
 # ------------------------------------------------------ service function
 
 
@@ -829,9 +901,11 @@ def build_evidence_profile(
                        request.profile.candidate_id, rules, request.as_of)
         for sid in sorted(skill_ids)
     ]
+    matching_evidence = _matching_evidence_from_profile(skills, entries, request.profile.candidate_id)
     log_event("evidence_profile_built", skills=len(skills), issues=len(issues))
     return EvidenceProfileResult(
         candidate_id=request.profile.candidate_id, as_of=request.as_of, skills=skills,
+        matching_evidence=matching_evidence,
         issues=_unique(issues), notes=RESULT_NOTES)
 
 

@@ -22,8 +22,6 @@ Eligibility is evaluated separately and never changes the score.
 
 from dataclasses import dataclass
 
-from pydantic import Field, model_validator
-
 from skillbridge.eligibility import evaluate_eligibility
 from skillbridge.normalization import DEFAULT_NORMALIZER, NormalizedSkill, SkillNormalizer
 from skillbridge.schemas import (
@@ -32,12 +30,12 @@ from skillbridge.schemas import (
     EvidenceBasis,
     EvidenceType,
     JobOpportunity,
+    MatchRubric,
     MatchResult,
     RequirementContribution,
     RequirementLevel,
     ScoreStatus,
     SkillEvidence,
-    StrictModel,
     VerificationStatus,
 )
 
@@ -46,35 +44,11 @@ _BASIS_RANK = {
     EvidenceBasis.SELF_REPORTED: 1,
     EvidenceBasis.UNVERIFIED_PROJECT: 2,
     EvidenceBasis.UNVERIFIED_ASSESSMENT: 2,
+    EvidenceBasis.UNVERIFIED_PRACTICAL_TASK: 2,
     EvidenceBasis.VERIFIED_PROJECT: 3,
     EvidenceBasis.VERIFIED_ASSESSMENT: 4,
+    EvidenceBasis.VERIFIED_PRACTICAL_TASK: 4,
 }
-
-
-class MatchRubric(StrictModel):
-    version: str = "rubric-1"
-    required_weight: float = Field(default=3.0, gt=0)
-    preferred_weight: float = Field(default=1.0, gt=0)
-    verified_project_credit: float = Field(default=0.8, ge=0, le=1)
-    unverified_credit: float = Field(default=0.3, ge=0, le=1)
-    self_reported_credit: float = Field(default=0.25, ge=0, le=1)
-
-    @model_validator(mode="after")
-    def _ordering(self) -> "MatchRubric":
-        if self.required_weight <= self.preferred_weight:
-            raise ValueError("required_weight must exceed preferred_weight")
-        if not (
-            self.self_reported_credit
-            <= self.unverified_credit
-            <= self.verified_project_credit
-        ):
-            raise ValueError(
-                "credits must satisfy self_reported <= unverified <= verified_project"
-            )
-        return self
-
-    def weight_for(self, level: RequirementLevel) -> float:
-        return self.required_weight if level == RequirementLevel.REQUIRED else self.preferred_weight
 
 
 DEFAULT_RUBRIC = MatchRubric()
@@ -113,19 +87,23 @@ def _basis_of(evidence: SkillEvidence) -> EvidenceBasis | None:
         return (
             EvidenceBasis.VERIFIED_ASSESSMENT if verified else EvidenceBasis.UNVERIFIED_ASSESSMENT
         )
+    if evidence.evidence_type == EvidenceType.PRACTICAL_TASK:
+        return (EvidenceBasis.VERIFIED_PRACTICAL_TASK if verified
+                else EvidenceBasis.UNVERIFIED_PRACTICAL_TASK)
     return EvidenceBasis.VERIFIED_PROJECT if verified else EvidenceBasis.UNVERIFIED_PROJECT
 
 
 def _credit_for(
     basis: EvidenceBasis, tier: list[SkillEvidence], rubric: MatchRubric
 ) -> tuple[float, list[str]]:
-    if basis == EvidenceBasis.VERIFIED_ASSESSMENT:
+    if basis in {EvidenceBasis.VERIFIED_ASSESSMENT, EvidenceBasis.VERIFIED_PRACTICAL_TASK}:
         latest = max(tier, key=lambda e: (e.recorded_at, e.evidence_ref))
         return latest.assessment_score, [latest.evidence_ref]
     refs = sorted({e.evidence_ref for e in tier if e.evidence_ref})
     if basis == EvidenceBasis.VERIFIED_PROJECT:
         return rubric.verified_project_credit, refs
-    if basis in (EvidenceBasis.UNVERIFIED_PROJECT, EvidenceBasis.UNVERIFIED_ASSESSMENT):
+    if basis in (EvidenceBasis.UNVERIFIED_PROJECT, EvidenceBasis.UNVERIFIED_ASSESSMENT,
+                 EvidenceBasis.UNVERIFIED_PRACTICAL_TASK):
         return rubric.unverified_credit, refs
     return rubric.self_reported_credit, refs
 
@@ -133,8 +111,10 @@ def _credit_for(
 def _explain(basis: EvidenceBasis, credit: float, rejected: int) -> str:
     text = {
         EvidenceBasis.VERIFIED_ASSESSMENT: f"Verified assessment result {credit:.2f}.",
+        EvidenceBasis.VERIFIED_PRACTICAL_TASK: f"Verified practical-task result {credit:.2f}.",
         EvidenceBasis.VERIFIED_PROJECT: "Verified project evidence.",
         EvidenceBasis.UNVERIFIED_ASSESSMENT: "Assessment evidence not yet verified.",
+        EvidenceBasis.UNVERIFIED_PRACTICAL_TASK: "Practical-task evidence not yet verified.",
         EvidenceBasis.UNVERIFIED_PROJECT: "Project evidence not yet verified.",
         EvidenceBasis.SELF_REPORTED: "Self-reported only; no supporting evidence.",
         EvidenceBasis.NO_EVIDENCE: (

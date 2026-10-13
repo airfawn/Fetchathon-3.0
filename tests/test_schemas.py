@@ -62,6 +62,15 @@ def test_assessment_score_bounded():
         make_evidence(kind="assessment", assessment_score=1.5)
 
 
+def test_practical_task_evidence_requires_a_score_and_reference():
+    evidence = make_evidence(kind="practical_task", evidence_ref="task-1", assessment_score=0.85)
+    assert evidence.evidence_type == "practical_task"
+    with pytest.raises(ValidationError):
+        make_evidence(kind="practical_task", evidence_ref="task-1")
+    with pytest.raises(ValidationError):
+        make_evidence(kind="practical_task", assessment_score=0.85)
+
+
 def test_project_requires_reference_and_rejects_score():
     with pytest.raises(ValidationError):
         make_evidence(kind="project", evidence_ref=None)

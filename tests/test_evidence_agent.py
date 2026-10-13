@@ -60,6 +60,33 @@ def test_passing_assessment_backs_claim():
     assert s.confidence == CF.SINGLE_SOURCE and not s.needs_assessment and s.recommended_assessment is None
 
 
+def test_profile_exports_actual_scoring_records_with_scores_and_provenance():
+    assessment_result = assessment(
+        verification_status="verified", verified_by="assessor-1")
+    task_result = task("t1", skills=("python",), score=0.75,
+                       verification_status="verified", verified_by="reviewer-2")
+    project_result = project(
+        verification_status="verified", verified_by="mentor-3", authorship_verified=True)
+    result = run(assessments=[assessment_result], tasks=[task_result], projects=[project_result])
+    evidence = {item.evidence_type.value: item for item in result.matching_evidence}
+    assert evidence["assessment"].assessment_score == 0.8
+    assert evidence["assessment"].evidence_ref == "a1"
+    assert evidence["assessment"].verification_status == "verified"
+    assert evidence["practical_task"].assessment_score == 0.75
+    assert evidence["practical_task"].evidence_ref == "t1"
+    assert evidence["project"].evidence_ref == "https://git.example.com/a"
+    assert evidence["project"].verification_status == "verified"
+
+
+def test_profile_excludes_insufficient_records_from_matching_input():
+    result = run(
+        assessments=[assessment(score=0.3)],
+        tasks=[task(score=None)],
+        projects=[project(model_interpreted=True)],
+    )
+    assert result.matching_evidence == []
+
+
 def test_multiple_evidence_types_are_corroborated_without_ranking():
     s = skill(run(assessments=[assessment()], tasks=[task()], projects=[project()]), "python")
     assert {EC.ASSESSMENT_BACKED, EC.PRACTICAL_TASK_BACKED, EC.PROJECT_BACKED} <= set(s.evidence_classes)

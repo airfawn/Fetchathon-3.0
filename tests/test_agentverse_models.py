@@ -26,7 +26,14 @@ from scripts.sync_agent_models import (
     main,
 )
 from skillbridge.matching import evaluate_match
-from skillbridge.schemas import SkillRequirement
+from skillbridge.schemas import (
+    ExtractionMethod,
+    EvidenceProfileResult,
+    OpportunityRecord,
+    SkillRequirement,
+    SourceKind,
+    missing_job_fields,
+)
 from tests.conftest import (
     NOW,
     experience_requirement,
@@ -69,6 +76,28 @@ ENVELOPE = {
 }
 ACTION = {"action_id": "a", "job_id": "j", "action_type": "apply_now",
           "rationale": "Meets requirements", "priority": 1}
+ACTION_JOB = make_job(
+    job_id="action-job", source_id="fixture-source",
+    required_skills=[SkillRequirement(skill="SIEM")],
+)
+ACTION_OPPORTUNITY = dump(OpportunityRecord(
+    job=ACTION_JOB, source_kind=SourceKind.FIXTURE, original_title=ACTION_JOB.title,
+    normalized_title=ACTION_JOB.title.casefold(), description="Fixture description.",
+    remote=True, skills_extraction=ExtractionMethod.STRUCTURED_SOURCE,
+    eligibility_extraction=ExtractionMethod.STRUCTURED_SOURCE,
+    missing_fields=missing_job_fields(ACTION_JOB, "Fixture description.", True),
+))
+ACTION_PROFILE = {"candidate_id": "cand-1", "as_of": NOW.isoformat(), "skills": [],
+                  "matching_evidence": [ASSESSMENT]}
+ACTION_PLAN_REQUEST = {
+    "candidate": CANDIDATE,
+    "opportunities": [ACTION_OPPORTUNITY],
+    "evidence_profile": ACTION_PROFILE,
+}
+ACTION_PLAN_RESULT = {
+    "candidate_id": "cand-1", "rubric": {}, "decision_policy": {},
+    "ranked_opportunities": [],
+}
 
 BEHAVIOR_CASES = {
     "CandidateProfile": [
@@ -81,8 +110,27 @@ BEHAVIOR_CASES = {
         changed(CANDIDATE, surprise=1),
         without(CANDIDATE, "target_role"),
     ],
+    "ActionPlanRequest": [
+        ACTION_PLAN_REQUEST,
+        without(ACTION_PLAN_REQUEST, "candidate"),
+        changed(ACTION_PLAN_REQUEST, evidence_profile={**ACTION_PROFILE, "candidate_id": "other"}),
+        changed(ACTION_PLAN_REQUEST, opportunities=[]),
+        changed(ACTION_PLAN_REQUEST, opportunities=[ACTION_OPPORTUNITY, ACTION_OPPORTUNITY]),
+        changed(ACTION_PLAN_REQUEST, evidence_profile={
+            **ACTION_PROFILE,
+            "matching_evidence": [changed(ASSESSMENT, candidate_id="other")],
+        }),
+        changed(ACTION_PLAN_REQUEST, matching_config={"required_weight": 1, "preferred_weight": 1}),
+    ],
+    "ActionPlanResult": [
+        ACTION_PLAN_RESULT,
+        without(ACTION_PLAN_RESULT, "ranked_opportunities"),
+        changed(ACTION_PLAN_RESULT, asi_summary="summary"),
+        changed(ACTION_PLAN_RESULT, decision_policy={"apply_now_score": -1}),
+    ],
     "SkillEvidence": [
         ASSESSMENT, PROJECT, SELF_REPORTED,
+        changed(ASSESSMENT, evidence_type="practical_task"),
         changed(ASSESSMENT, assessment_score=None),
         changed(ASSESSMENT, evidence_ref=None),
         changed(ASSESSMENT, assessment_score=1.5),
@@ -90,6 +138,7 @@ BEHAVIOR_CASES = {
         changed(PROJECT, assessment_score=0.5),
         changed(SELF_REPORTED, verification_status="verified"),
         changed(ASSESSMENT, recorded_at="2026-01-01T12:00:00"),
+        changed(ASSESSMENT, evidence_type="practical_task", evidence_ref=None),
         without(ASSESSMENT, "verification_status"),
     ],
     "JobOpportunity": [
@@ -297,7 +346,10 @@ def test_blocks_include_only_what_each_agent_needs(blocks):
     for unneeded in ("class JobOpportunity", "class MatchResult", "class CareerAction"):
         assert unneeded not in evidence
     action = blocks["agents/action_agent.py"]
-    assert "class CareerAction" in action and "class CandidateProfile" not in action
+    assert "class ActionPlanRequest" in action and "class CandidateProfile" in action
+    for required in ("class OpportunityRecord", "class EvidenceProfileResult", "class MatchResult",
+                     "class MatchRubric"):
+        assert required in action
     opportunity = blocks["agents/opportunity_agent.py"]
     assert "class JobOpportunity" in opportunity and "class SkillEvidence" not in opportunity
 

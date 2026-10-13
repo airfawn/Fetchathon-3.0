@@ -68,6 +68,7 @@ class CandidateProfile(StrictModel):
 class EvidenceType(StrEnum):
     SELF_REPORTED = "self_reported"
     ASSESSMENT = "assessment"
+    PRACTICAL_TASK = "practical_task"
     PROJECT = "project"
 
 
@@ -90,9 +91,9 @@ class SkillEvidence(StrictModel):
     @model_validator(mode="after")
     def _check_type_rules(self) -> "SkillEvidence":
         kind = self.evidence_type
-        if kind == EvidenceType.ASSESSMENT:
+        if kind in {EvidenceType.ASSESSMENT, EvidenceType.PRACTICAL_TASK}:
             if self.assessment_score is None or self.evidence_ref is None:
-                raise ValueError("assessment evidence requires assessment_score and evidence_ref")
+                raise ValueError("scored evidence requires assessment_score and evidence_ref")
         elif self.assessment_score is not None:
             raise ValueError("assessment_score is only valid for assessment evidence")
         if kind == EvidenceType.PROJECT and self.evidence_ref is None:
@@ -241,11 +242,16 @@ class MatchRubric(StrictModel):
             )
         return self
 
+    def weight_for(self, level: RequirementLevel) -> float:
+        return self.required_weight if level == RequirementLevel.REQUIRED else self.preferred_weight
+
 
 class EvidenceBasis(StrEnum):
     VERIFIED_ASSESSMENT = "verified_assessment"
+    VERIFIED_PRACTICAL_TASK = "verified_practical_task"
     VERIFIED_PROJECT = "verified_project"
     UNVERIFIED_ASSESSMENT = "unverified_assessment"
+    UNVERIFIED_PRACTICAL_TASK = "unverified_practical_task"
     UNVERIFIED_PROJECT = "unverified_project"
     SELF_REPORTED = "self_reported"
     NO_EVIDENCE = "no_evidence"
@@ -331,6 +337,12 @@ class OpportunityDecision(StrEnum):
     NEEDS_MORE_INFORMATION = "needs_more_information"
 
 
+class ConstraintFit(StrEnum):
+    FITS = "fits"
+    MISMATCH = "mismatch"
+    UNKNOWN = "unknown"
+
+
 class DecisionPolicy(StrictModel):
     version: NonEmptyStr = "career-action-1"
     apply_now_score: float = Field(default=70, ge=0, le=100)
@@ -390,43 +402,13 @@ class OpportunityRecommendation(StrictModel):
     eligibility: EligibilityResult
     match: MatchResult
     decision: OpportunityDecision
+    constraint_fit: ConstraintFit
+    constraint_notes: list[NonEmptyStr] = Field(default_factory=list)
     supported_competencies: list[NonEmptyStr] = Field(default_factory=list)
     unsupported_claims: list[NonEmptyStr] = Field(default_factory=list)
     missing_evidence: list[NonEmptyStr] = Field(default_factory=list)
     important_skill_gaps: list[NonEmptyStr] = Field(default_factory=list)
     explanation: NonEmptyStr
-
-
-class ActionPlanRequest(StrictModel):
-    candidate: CandidateProfile
-    opportunities: list[OpportunityRecord] = Field(min_length=1, max_length=100)
-    evidence_profile: EvidenceProfileResult
-    # Raw normalized evidence is needed to preserve assessment scores and evidence type
-    # for the deterministic matching rubric; the aggregate profile alone omits those values.
-    matching_evidence: list[SkillEvidence] = Field(default_factory=list, max_length=1000)
-    matching_config: MatchRubric = Field(default_factory=MatchRubric)
-    decision_policy: DecisionPolicy = Field(default_factory=DecisionPolicy)
-    improvement_metadata: list[ImprovementMetadata] = Field(default_factory=list, max_length=100)
-
-    @model_validator(mode="after")
-    def _same_candidate(self) -> "ActionPlanRequest":
-        if self.evidence_profile.candidate_id != self.candidate.candidate_id:
-            raise ValueError("evidence profile belongs to a different candidate")
-        foreign = {e.candidate_id for e in self.matching_evidence} - {self.candidate.candidate_id}
-        if foreign:
-            raise ValueError("matching evidence belongs to a different candidate")
-        if len({o.job.job_id for o in self.opportunities}) != len(self.opportunities):
-            raise ValueError("opportunity job_id values must be unique")
-        return self
-
-
-class ActionPlanResult(StrictModel):
-    candidate_id: NonEmptyStr
-    rubric: MatchRubric
-    decision_policy: DecisionPolicy
-    ranked_opportunities: list[OpportunityRecommendation]
-    prioritized_improvements: list[PrioritizedImprovement] = Field(default_factory=list)
-    notes: list[NonEmptyStr] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------- envelopes
@@ -814,6 +796,58 @@ class EvidenceProfileResult(StrictModel):
     candidate_id: NonEmptyStr
     as_of: AwareDatetime
     skills: list[SkillEvidenceProfile]
+    # Flat evidence consumed by the deterministic matching rubric. Contains only
+    # records classified as supporting; raw scores/references remain traceable.
+    matching_evidence: list[SkillEvidence] = Field(default_factory=list)
     # Problems found in the supplied records (missing, mismatched, duplicate, invalid).
     issues: list[NonEmptyStr] = Field(default_factory=list)
+    notes: list[NonEmptyStr] = Field(default_factory=list)
+
+
+class ActionPlanRequest(StrictModel):
+    candidate: CandidateProfile
+    opportunities: list[OpportunityRecord] = Field(min_length=1, max_length=100)
+    evidence_profile: EvidenceProfileResult
+    matching_config: MatchRubric = Field(default_factory=MatchRubric)
+    decision_policy: DecisionPolicy = Field(default_factory=DecisionPolicy)
+    improvement_metadata: list[ImprovementMetadata] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def _same_candidate(self) -> "ActionPlanRequest":
+        if self.evidence_profile.candidate_id != self.candidate.candidate_id:
+            raise ValueError("evidence profile belongs to a different candidate")
+        foreign = {e.candidate_id for e in self.evidence_profile.matching_evidence} - {self.candidate.candidate_id}
+        if foreign:
+            raise ValueError("matching evidence belongs to a different candidate")
+        if len({o.job.job_id for o in self.opportunities}) != len(self.opportunities):
+            raise ValueError("opportunity job_id values must be unique")
+        evidence_by_skill = {}
+        for item in self.evidence_profile.matching_evidence:
+            evidence_by_skill.setdefault(item.skill_id, set()).add(item.evidence_type)
+        required_types = {
+            EvidenceClass.ASSESSMENT_BACKED: EvidenceType.ASSESSMENT,
+            EvidenceClass.PRACTICAL_TASK_BACKED: EvidenceType.PRACTICAL_TASK,
+            EvidenceClass.PROJECT_BACKED: EvidenceType.PROJECT,
+        }
+        for skill in self.evidence_profile.skills:
+            available = evidence_by_skill.get(skill.skill_id, set())
+            for evidence_class, evidence_type in required_types.items():
+                if evidence_class in skill.evidence_classes and evidence_type not in available:
+                    raise ValueError(
+                        f"evidence profile for {skill.skill_id!r} is missing its {evidence_type.value} record"
+                    )
+            if EvidenceClass.INDEPENDENTLY_VERIFIED in skill.evidence_classes and not any(
+                item.skill_id == skill.skill_id and item.verification_status == VerificationStatus.VERIFIED
+                for item in self.evidence_profile.matching_evidence
+            ):
+                raise ValueError(f"evidence profile for {skill.skill_id!r} is missing its verified record")
+        return self
+
+
+class ActionPlanResult(StrictModel):
+    candidate_id: NonEmptyStr
+    rubric: MatchRubric
+    decision_policy: DecisionPolicy
+    ranked_opportunities: list[OpportunityRecommendation]
+    prioritized_improvements: list[PrioritizedImprovement] = Field(default_factory=list)
     notes: list[NonEmptyStr] = Field(default_factory=list)

@@ -27,6 +27,17 @@ def test_verified_assessment_scores_its_result():
     assert result.breakdown[0].evidence_basis == EvidenceBasis.VERIFIED_ASSESSMENT
 
 
+def test_verified_practical_task_uses_its_recorded_score():
+    task = make_evidence(
+        kind="practical_task", evidence_ref="task-1", assessment_score=0.86,
+        verification_status="verified",
+    )
+    result = evaluate_match(make_candidate(), [task], make_job())
+    assert result.skill_alignment_score == 86.0
+    assert result.breakdown[0].evidence_basis == EvidenceBasis.VERIFIED_PRACTICAL_TASK
+    assert result.breakdown[0].evidence_refs == ["task-1"]
+
+
 def test_evidence_tiers_are_ordered():
     candidate = make_candidate(claimed_skills=["SIEM"])
     job = make_job()

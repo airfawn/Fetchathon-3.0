@@ -97,7 +97,16 @@ AGENT_MODELS: dict[str, tuple[str, ...]] = {
         "canonical_text",
         *_TRANSPORT_NAMES,
     ),
-    "agents/action_agent.py": ("MatchResult", "CareerAction", *_TRANSPORT_NAMES),
+    "agents/action_agent.py": (
+        "ActionPlanRequest",
+        "ActionPlanResult",
+        "CAREER_ACTION_MESSAGE",
+        "CAREER_ACTION_RESULT_MESSAGE",
+        "SkillNormalizer",
+        "SKILL_ALIAS_DATA",
+        "canonical_text",
+        *_TRANSPORT_NAMES,
+    ),
 }
 
 _BLOCK_PATTERN = re.compile(
