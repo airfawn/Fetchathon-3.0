@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "id": "siem",
+      "aliases": ["Security Information and Event Management"],
+      "note": "Acronym and its expansion name the same technology category."
+    },
+    {
+      "id": "linux-administration",
+      "aliases": ["Linux system administration"],
+      "note": "Administration vs system administration is a wording difference only. Plain 'Linux' (usage/familiarity) is deliberately not merged."
+    },
+    {
+      "id": "python",
+      "aliases": ["Python programming", "Python programming language"],
+      "note": "Same language. 'Python scripting' is deliberately kept separate because it describes a narrower scope of use."
+    },
+    {
+      "id": "tcp-ip-networking",
+      "aliases": ["TCP/IP", "TCP IP", "TCPIP"],
+      "note": "Spelling variants of the TCP/IP protocol suite. Deliberately NOT merged with 'computer networking', which is a broader field."
+    },
+    {
+      "id": "computer-networking",
+      "aliases": ["Computer networks"],
+      "note": "Broad networking competency. Kept separate from TCP/IP networking so a narrow protocol skill is not credited as the whole field, or the reverse."
+    },
+    {
+      "id": "web-application-security",
+      "aliases": ["Web security", "Web app security"],
+      "note": "Equivalent phrasing in job postings. Broader 'application security' and 'network security' are deliberately not merged."
+    },
+    {
+      "id": "incident-response",
+      "aliases": ["Security incident response", "Cyber incident response"],
+      "note": "Security qualifier is implied in this context. ITSM 'incident management' is a different discipline and is not merged."
+    },
+    {
+      "id": "digital-forensics",
+      "aliases": ["Digital forensic analysis"],
+      "note": "Wording variants only. 'Malware analysis' and 'memory forensics' are specialisations and are not merged."
+    },
+    {
+      "id": "aws",
+      "aliases": ["Amazon Web Services"],
+      "note": "Acronym and company name for the same platform. Individual services such as 'AWS IAM' are not merged into this general skill."
+    },
+    {
+      "id": "iam",
+      "aliases": ["Identity and Access Management"],
+      "note": "General IAM discipline. Bare 'IAM' can also mean the AWS service, so 'AWS IAM' is deliberately kept separate."
+    },
+    {
+      "id": "ci-cd",
+      "aliases": [
+        "CI/CD",
+        "CI CD",
+        "CICD",
+        "Continuous Integration and Continuous Delivery",
+        "Continuous Integration/Continuous Delivery"
+      ],
+      "note": "Delivery expansion only. 'Continuous deployment' and standalone 'continuous integration' are narrower or different practices and are not merged."
+    },
+    {
+      "id": "javascript",
+      "aliases": ["JS"],
+      "note": "Common abbreviation. Unrelated to Java, which stays separate."
+    },
+    {
+      "id": "sql",
+      "aliases": ["Structured Query Language"],
+      "note": "Acronym and expansion. NoSQL is a different family of databases and is not merged."
+    },
+    {
+      "id": "kubernetes",
+      "aliases": ["K8s"],
+      "note": "Standard abbreviation. Docker is a different tool and stays separate."
+    },
+    {
+      "id": "penetration-testing",
+      "aliases": ["Pen testing", "Pentesting"],
+      "note": "Wording variants. 'Vulnerability assessment' and 'ethical hacking' are not merged."
+    },
+    {
+      "id": "rest-api",
+      "aliases": ["RESTful API", "REST APIs", "RESTful APIs"],
+      "note": "Wording and plural variants. Generic 'API' and 'GraphQL' are not merged."
+    },
+    {
+      "id": "object-oriented-programming",
+      "aliases": ["OOP"],
+      "note": "Acronym and expansion."
+    }
+  ],
+  "keep_separate": [
+    {
+      "terms": ["TCP/IP networking", "computer networking"],
+      "reason": "Protocol suite vs the broader networking field."
+    },
+    {
+      "terms": ["IAM", "AWS IAM"],
+      "reason": "General discipline vs a specific cloud service."
+    },
+    {
+      "terms": ["Linux", "Linux administration", "Windows administration"],
+      "reason": "Using an OS, administering it, and administering a different OS are different competencies."
+    },
+    {
+      "terms": ["Java", "JavaScript"],
+      "reason": "Unrelated languages with similar names."
+    },
+    {
+      "terms": ["SQL", "NoSQL"],
+      "reason": "Relational query language vs a different database family."
+    },
+    {
+      "terms": ["Python", "Python scripting"],
+      "reason": "General programming vs a narrower use."
+    },
+    {
+      "terms": ["CI/CD", "continuous integration", "continuous deployment"],
+      "reason": "CI/CD is the combined pipeline practice; the other terms name narrower practices."
+    },
+    {
+      "terms": ["web application security", "application security", "network security"],
+      "reason": "Different security domains."
+    },
+    {
+      "terms": ["penetration testing", "vulnerability assessment"],
+      "reason": "Active exploitation vs identification of weaknesses."
+    },
+    {
+      "terms": ["digital forensics", "malware analysis"],
+      "reason": "Malware analysis is a specialisation, not a synonym."
+    },
+    {
+      "terms": ["incident response", "incident management"],
+      "reason": "Security response vs ITSM process."
+    },
+    {
+      "terms": ["Kubernetes", "Docker"],
+      "reason": "Orchestrator vs container runtime and tooling."
+    },
+    {
+      "terms": ["AWS", "Azure", "cloud computing"],
+      "reason": "A specific vendor platform is not the same as other platforms or the general field."
+    }
+  ]
+}

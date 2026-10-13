@@ -1,0 +1,4 @@
+uagents==0.26.1
+requests>=2.31,<3
+pydantic>=2.11,<3
+pytest>=9,<10
