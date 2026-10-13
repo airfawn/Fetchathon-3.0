@@ -351,6 +351,25 @@ BEHAVIOR_CASES.update({
 # Wire models check types only; canonical rules are applied by the converters.
 WIRE_REQUEST = {"request_id": "r1", "sender": "orchestrator", "recipient": "opportunity_intelligence",
                 "message_type": "opportunity.search", "created_at": "2026-01-01T00:00:00+00:00"}
+GUIDANCE_SKILL = {
+    "skill": "SIEM", "why_it_matters": "Core SOC tooling.", "evidence_to_produce": "A lab write-up.",
+    "completion_criteria": "Triage three alerts.", "current_status": "no_evidence_provided",
+}
+BEHAVIOR_CASES["GuidanceRequest"] = [
+    {"candidate": ACTION_PLAN_REQUEST["candidate"], "evidence_profile": ACTION_PROFILE},
+    {"candidate": changed(ACTION_PLAN_REQUEST["candidate"], candidate_id="other"), "evidence_profile": ACTION_PROFILE},
+]
+BEHAVIOR_CASES["SkillGuidance"] = [
+    GUIDANCE_SKILL,
+    changed(GUIDANCE_SKILL, why_it_matters="See https://example.com"),
+    changed(GUIDANCE_SKILL, current_status="verified"),
+]
+BEHAVIOR_CASES["GuidanceResult"] = [
+    {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL]},
+    {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL], "verified_against_job_listings": True},
+    {"candidate_id": "c", "target_role": "SOC Analyst", "skills": [GUIDANCE_SKILL] * 7},
+]
+
 BEHAVIOR_CASES["AgentRequestMessage"] = [
     WIRE_REQUEST, {**WIRE_REQUEST, "payload": {"a": 1}}, without(WIRE_REQUEST, "request_id"),
     changed(WIRE_REQUEST, created_at="not a date"), changed(WIRE_REQUEST, payload="x"),

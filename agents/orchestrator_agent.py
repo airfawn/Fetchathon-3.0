@@ -843,6 +843,48 @@ class ActionPlanRequest(StrictModel):
         return self
 
 
+CAREER_GUIDANCE_MESSAGE = "career.action.guidance"
+CAREER_GUIDANCE_RESULT_MESSAGE = "career.action.guidance.result"
+
+
+class GuidanceRequest(StrictModel):
+    """Role-readiness guidance request used when no validated job listings exist."""
+
+    candidate: CandidateProfile
+    evidence_profile: EvidenceProfileResult
+
+    @model_validator(mode="after")
+    def _same_candidate(self) -> "GuidanceRequest":
+        if self.evidence_profile.candidate_id != self.candidate.candidate_id:
+            raise ValueError("evidence profile belongs to a different candidate")
+        return self
+
+
+class SkillGuidance(StrictModel):
+    skill: NonEmptyStr = Field(max_length=80)
+    why_it_matters: NonEmptyStr = Field(max_length=400)
+    evidence_to_produce: NonEmptyStr = Field(max_length=400)
+    completion_criteria: NonEmptyStr = Field(max_length=400)
+    # Set deterministically from the evidence profile, never by the model.
+    current_status: Literal["no_evidence_provided", "claimed_without_evidence", "has_supporting_evidence"]
+
+    @model_validator(mode="after")
+    def _no_links(self) -> "SkillGuidance":
+        text = " ".join([self.why_it_matters, self.evidence_to_produce, self.completion_criteria]).lower()
+        if "http://" in text or "https://" in text or "www." in text:
+            raise ValueError("guidance must not contain links; resources are never invented")
+        return self
+
+
+class GuidanceResult(StrictModel):
+    candidate_id: NonEmptyStr
+    target_role: NonEmptyStr
+    guidance_source: Literal["model_generated_unverified"] = "model_generated_unverified"
+    verified_against_job_listings: Literal[False] = False
+    skills: list[SkillGuidance] = Field(max_length=6)
+    notes: list[NonEmptyStr] = Field(default_factory=list)
+
+
 class ActionPlanResult(StrictModel):
     candidate_id: NonEmptyStr
     rubric: MatchRubric
@@ -1005,6 +1047,7 @@ class CandidateWorkflowResult(StrictModel):
     opportunities: OpportunitySearchResult | None = None
     evidence_profile: EvidenceProfileResult | None = None
     action_plan: ActionPlanResult | None = None
+    guidance: GuidanceResult | None = None
     completed_at: AwareDatetime
     replayed: bool = False
 
@@ -1038,10 +1081,11 @@ class CandidateWorkflowResult(StrictModel):
 AGENT_NAME = "skillbridge_conversational_orchestrator"
 ASI1_DEFAULT_BASE_URL = "https://api.asi1.ai/v1"
 ASI1_DEFAULT_MODEL = "asi1"
-ASI_TIMEOUT_SECONDS = 30
+ASI_TIMEOUT_SECONDS = 20
 ASI_MAX_ATTEMPTS = 3
-AGENT_TIMEOUT_SECONDS = 30
-AGENT_MAX_ATTEMPTS = 2
+AGENT_TIMEOUT_SECONDS = 18
+AGENT_MAX_ATTEMPTS = 1
+GUIDANCE_TIMEOUT_SECONDS = 30
 REQUIRED_INTAKE = (
     ("target_role", "the role you are targeting"),
     ("country", "the country where you want to search"),
@@ -1206,7 +1250,10 @@ def _extract_chat_intake(text: str, candidate_id: str | None = None) -> ChatInta
     }
     url = base_url + "/chat/completions"
     last_error = None
+    started = time.monotonic()
     for attempt in range(1, ASI_MAX_ATTEMPTS + 1):
+        if attempt > 1 and time.monotonic() - started > ASI_TIMEOUT_SECONDS:
+            break  # hosted agents are killed after ~100s; leave time to reply
         try:
             response = requests.post(
                 url,
@@ -1261,7 +1308,8 @@ def _address_config() -> dict[AgentName, str]:
     return result
 
 
-async def _call_agent(ctx, address, request, expected_sender, expected_type):
+async def _call_agent(ctx, address, request, expected_sender, expected_type,
+                      timeout=AGENT_TIMEOUT_SECONDS):
     wire = request_to_message(request)
     last_error = None
     for attempt in range(1, AGENT_MAX_ATTEMPTS + 1):
@@ -1271,9 +1319,9 @@ async def _call_agent(ctx, address, request, expected_sender, expected_type):
                     address,
                     wire,
                     response_type=AgentResponseMessage,
-                    timeout=AGENT_TIMEOUT_SECONDS,
+                    timeout=timeout,
                 ),
-                timeout=AGENT_TIMEOUT_SECONDS + 2,
+                timeout=timeout + 2,
             )
             if reply is None or status.status != DeliveryStatus.DELIVERED:
                 raise RuntimeError(status.detail or "agent did not reply")
@@ -1366,6 +1414,26 @@ def _validate_action(result: ActionPlanResult, candidate_id, opportunities, evid
             raise ValueError("action plan cited evidence not in the validated evidence profile")
 
 
+async def _request_guidance(ctx, addresses, request_id, candidate, evidence_profile):
+    """Ask the Career Action Agent for unverified skill guidance when no jobs exist."""
+    request = _make_request(
+        request_id + ":career-guidance", AgentName.CAREER_ACTION, CAREER_GUIDANCE_MESSAGE,
+        GuidanceRequest(candidate=candidate, evidence_profile=evidence_profile).model_dump(mode="json"),
+    )
+    try:
+        reply = await _call_agent(
+            ctx, addresses[AgentName.CAREER_ACTION], request, AgentName.CAREER_ACTION,
+            CAREER_GUIDANCE_RESULT_MESSAGE, timeout=GUIDANCE_TIMEOUT_SECONDS,
+        )
+        guidance = _response_payload(reply, GuidanceResult)
+        if guidance.candidate_id != candidate.candidate_id:
+            raise ValueError("guidance belongs to a different candidate")
+    except Exception as error:
+        log_event("guidance_failed", logging.WARNING, error=type(error).__name__, detail=str(error)[:200])
+        return None, "no validated job records were available and skill guidance could not be produced"
+    return guidance, "no validated job records; guidance is model-generated and unverified"
+
+
 async def _run_workflow(ctx, sender, state: ConversationState) -> CandidateWorkflowResult:
     values = state.values
     addresses = _address_config()
@@ -1450,6 +1518,8 @@ async def _run_workflow(ctx, sender, state: ConversationState) -> CandidateWorkf
     evidence_profile = _response_payload(evidence_reply, EvidenceProfileResult)
     _validate_evidence(evidence_profile, candidate_id, workflow_request)
     if not opportunities.records:
+        guidance, guidance_note = await _request_guidance(
+            ctx, addresses, request_id, candidate, evidence_profile)
         return CandidateWorkflowResult(
             request_id=request_id,
             workflow_status=WorkflowStatus.PARTIAL,
@@ -1459,11 +1529,12 @@ async def _run_workflow(ctx, sender, state: ConversationState) -> CandidateWorkf
             ),
             evidence_stage=WorkflowStage(status=StageStatus.SUCCEEDED),
             action_stage=WorkflowStage(
-                status=StageStatus.SKIPPED,
-                message="no validated job records were available for action planning",
+                status=StageStatus.PARTIAL if guidance else StageStatus.SKIPPED,
+                message=None if guidance else guidance_note,
             ),
             opportunities=opportunities,
             evidence_profile=evidence_profile,
+            guidance=guidance,
             completed_at=_now(),
         )
     action_data = ActionPlanRequest(
@@ -1528,7 +1599,22 @@ def _format_workflow(result: CandidateWorkflowResult) -> str:
             + (f", error {report.error_code}" if report.error_code else "")
         )
     if plan is None:
-        lines.append("No action plan was produced because validated job data was unavailable.")
+        lines.append("No job-based action plan was produced because validated job data was unavailable.")
+        guidance = result.guidance
+        if guidance is None:
+            lines.append("I also couldn't produce skill guidance right now; please try again shortly.")
+        else:
+            lines.append(
+                f"\nSkill-development guidance for {guidance.target_role} (AI-generated for the role in "
+                "general, NOT from job listings and not verified; no hiring claims):"
+            )
+            for number, item in enumerate(guidance.skills, 1):
+                lines.append(
+                    f"\n{number}. {item.skill} — your evidence: {item.current_status.replace('_', ' ')}\n"
+                    f"Why: {item.why_it_matters}\nBuild: {item.evidence_to_produce}\n"
+                    f"Done when: {item.completion_criteria}"
+                )
+            lines.append("\nTry a different or broader role/keywords to search again for real listings.")
         return "\n".join(lines)
     lines.append("\nCareer action recommendations (alignment is not employment probability):")
     for recommendation in plan.ranked_opportunities[:8]:

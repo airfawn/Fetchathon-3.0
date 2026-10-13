@@ -14,6 +14,7 @@ from skillbridge.schemas import (
     DeclaredSkill,
     ExperienceLevel,
     EvidenceProfileResult,
+    GuidanceResult,
     ImprovementMetadata,
     MatchRubric,
     NonEmptyStr,
@@ -120,6 +121,7 @@ class CandidateWorkflowResult(StrictModel):
     opportunities: OpportunitySearchResult | None = None
     evidence_profile: EvidenceProfileResult | None = None
     action_plan: ActionPlanResult | None = None
+    guidance: GuidanceResult | None = None
     completed_at: AwareDatetime
     replayed: bool = False
 

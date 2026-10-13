@@ -260,3 +260,88 @@ def test_asi_provider_timeout_raises_provider_error(monkeypatch):
 
     with pytest.raises(coordinator.ASIProviderError):
         coordinator._extract_chat_intake("hello", "candidate-test")
+
+
+class FakeGuidanceClient:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def role_guidance(self, candidate, evidence_profile):
+        make = action_agent.ASISkillSuggestion
+        return [
+            make(skill="SIEM", why_it_matters="Core SOC tooling.", evidence_to_produce="A lab write-up.",
+                 completion_criteria="Triage three alerts."),
+            make(skill="Security Information and Event Management", why_it_matters="dup",
+                 evidence_to_produce="dup", completion_criteria="dup"),
+            make(skill="Incident Response", why_it_matters="Handling incidents.",
+                 evidence_to_produce="A playbook.", completion_criteria="Playbook reviewed."),
+        ]
+
+
+def _empty_workflow(monkeypatch, guidance_ok):
+    addresses = {name: f"{name.value}-address" for name in coordinator.AgentName
+                 if name != coordinator.AgentName.ORCHESTRATOR}
+    monkeypatch.setattr(coordinator, "_address_config", lambda: addresses)
+    monkeypatch.setenv("ASI1_API_KEY", "test-key")
+    monkeypatch.setattr(action_agent, "ASIOneClient", FakeGuidanceClient)
+    calls = []
+
+    async def reply(_ctx, _address, request, expected_sender, expected_type, timeout=None):
+        calls.append(request.message_type)
+        if expected_sender == coordinator.AgentName.OPPORTUNITY_INTELLIGENCE:
+            payload = opportunity_result(records=[]).model_dump(mode="json")
+        elif expected_sender == coordinator.AgentName.CANDIDATE_EVIDENCE:
+            query = evidence_agent.EvidenceProfileRequest.model_validate(request.payload)
+            payload = evidence_agent.build_evidence_profile(query).model_dump(mode="json")
+        else:
+            if not guidance_ok:
+                raise RuntimeError("career action agent did not respond")
+            wire = action_agent.handle_action_request(request)
+            assert wire.status == "success", wire.error
+            payload = wire.payload
+        return coordinator.AgentResponse(
+            request_id=request.request_id, sender=expected_sender,
+            recipient=coordinator.AgentName.ORCHESTRATOR, message_type=expected_type,
+            created_at=request.created_at, status="success", payload=payload)
+
+    monkeypatch.setattr(coordinator, "_call_agent", reply)
+    values = {"target_role": "SOC Analyst", "country": "IN", "experience_level": "entry_level",
+              "learning_hours_per_week": 5, "claimed_skills": ["SIEM"]}
+    result = run_async(coordinator._run_workflow(
+        FakeContext(), "agent1qempty", SimpleNamespace(values=values)))
+    return result, calls
+
+
+def test_no_jobs_returns_labeled_guidance_from_career_action_agent(monkeypatch):
+    result, calls = _empty_workflow(monkeypatch, guidance_ok=True)
+
+    assert coordinator.CAREER_GUIDANCE_MESSAGE in calls
+    assert result.action_plan is None
+    assert result.guidance.guidance_source == "model_generated_unverified"
+    assert result.guidance.verified_against_job_listings is False
+    # The duplicate alias is dropped; status comes from evidence, not the model.
+    assert [item.skill for item in result.guidance.skills] == ["SIEM", "Incident Response"]
+    assert result.guidance.skills[0].current_status == "claimed_without_evidence"
+    assert result.guidance.skills[1].current_status == "no_evidence_provided"
+    text = coordinator._format_workflow(result)
+    assert "NOT from job listings" in text and "Incident Response" in text
+
+
+def test_no_jobs_and_guidance_failure_is_reported_not_invented(monkeypatch):
+    result, _ = _empty_workflow(monkeypatch, guidance_ok=False)
+
+    assert result.guidance is None
+    assert result.action_stage.status == coordinator.StageStatus.SKIPPED
+    assert "couldn't produce skill guidance" in coordinator._format_workflow(result)
+
+
+def test_guidance_without_asi_key_returns_error_response(monkeypatch):
+    monkeypatch.delenv("ASI1_API_KEY", raising=False)
+    monkeypatch.delenv("ASI_ONE_API_KEY", raising=False)
+    result, _ = None, None
+    request = action_agent.AgentRequest(
+        request_id="r:career-guidance", sender=action_agent.AgentName.ORCHESTRATOR,
+        recipient=action_agent.AgentName.CAREER_ACTION,
+        message_type=action_agent.CAREER_GUIDANCE_MESSAGE, created_at=datetime.now(timezone.utc),
+        payload={"bad": True})
+    assert action_agent.handle_action_request(request).error.code == "invalid_request"

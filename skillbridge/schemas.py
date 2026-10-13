@@ -863,6 +863,48 @@ class ActionPlanRequest(StrictModel):
         return self
 
 
+CAREER_GUIDANCE_MESSAGE = "career.action.guidance"
+CAREER_GUIDANCE_RESULT_MESSAGE = "career.action.guidance.result"
+
+
+class GuidanceRequest(StrictModel):
+    """Role-readiness guidance request used when no validated job listings exist."""
+
+    candidate: CandidateProfile
+    evidence_profile: EvidenceProfileResult
+
+    @model_validator(mode="after")
+    def _same_candidate(self) -> "GuidanceRequest":
+        if self.evidence_profile.candidate_id != self.candidate.candidate_id:
+            raise ValueError("evidence profile belongs to a different candidate")
+        return self
+
+
+class SkillGuidance(StrictModel):
+    skill: NonEmptyStr = Field(max_length=80)
+    why_it_matters: NonEmptyStr = Field(max_length=400)
+    evidence_to_produce: NonEmptyStr = Field(max_length=400)
+    completion_criteria: NonEmptyStr = Field(max_length=400)
+    # Set deterministically from the evidence profile, never by the model.
+    current_status: Literal["no_evidence_provided", "claimed_without_evidence", "has_supporting_evidence"]
+
+    @model_validator(mode="after")
+    def _no_links(self) -> "SkillGuidance":
+        text = " ".join([self.why_it_matters, self.evidence_to_produce, self.completion_criteria]).lower()
+        if "http://" in text or "https://" in text or "www." in text:
+            raise ValueError("guidance must not contain links; resources are never invented")
+        return self
+
+
+class GuidanceResult(StrictModel):
+    candidate_id: NonEmptyStr
+    target_role: NonEmptyStr
+    guidance_source: Literal["model_generated_unverified"] = "model_generated_unverified"
+    verified_against_job_listings: Literal[False] = False
+    skills: list[SkillGuidance] = Field(max_length=6)
+    notes: list[NonEmptyStr] = Field(default_factory=list)
+
+
 class ActionPlanResult(StrictModel):
     candidate_id: NonEmptyStr
     rubric: MatchRubric
