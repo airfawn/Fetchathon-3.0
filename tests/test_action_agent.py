@@ -355,7 +355,7 @@ def test_asi_one_summarizes_plan_with_validated_structured_response():
 
     assert summary.cited_job_ids == ["job-1"]
     assert captured["url"] == "https://api.asi1.ai/v1/chat/completions"
-    assert captured["timeout"] == aa.ASI_TIMEOUT_SECONDS
+    assert captured["timeout"] == aa._http_timeout(aa.ASI_TIMEOUT_SECONDS)
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert captured["json"]["response_format"]["type"] == "json_schema"
     serialized_input = captured["json"]["messages"][1]["content"]
@@ -395,6 +395,63 @@ def test_asi_one_retries_timeout_only_with_bounded_attempts():
         ).summarize(run())
     assert len(calls) == aa.ASI_MAX_ATTEMPTS
     assert len(sleeps) == aa.ASI_MAX_ATTEMPTS - 1
+
+
+def test_role_guidance_caches_identical_context_but_scopes_cache_to_location():
+    aa._GUIDANCE_CACHE.clear()
+    calls = []
+    content = '{"skills":[],"certifications":[],"projects":[]}'
+
+    def post(*_args, **_kwargs):
+        calls.append(1)
+        return MockASIResponse(content)
+
+    client = aa.ASIOneClient(aa.ASIOneSettings(api_key="test-key"), http_post=post)
+    context = {"target_role": "SOC Analyst", "preferred_location": "India"}
+    client._guidance(context, ("skills", "certifications", "projects"))
+    client._guidance(context, ("skills", "certifications", "projects"))
+    client._guidance(
+        {**context, "preferred_location": "United States"},
+        ("skills", "certifications", "projects"),
+    )
+
+    assert len(calls) == 2
+
+
+def test_guidance_uses_curated_certification_requirements_and_strips_unverified_claims():
+    references = aa._certification_references({
+        "target_role": "AWS Cloud Engineer",
+        "claimed_skills": [],
+        "candidate_described_projects": [],
+        "job_market_context": [],
+    })
+    suggestions = aa.ASISkillSuggestions(
+        skills=[],
+        certifications=[
+            aa.CertificationSuggestion(
+                name="AWS Cloud Practitioner", issuer="AWS",
+                why_relevant="A useful cloud foundation.",
+            ),
+            aa.CertificationSuggestion(
+                name="Invented Credential", issuer="Unknown",
+                why_relevant="Unverified suggestion.",
+                verified_requirements="Model-supplied prerequisites.",
+                official_source_url="https://example.invalid/fake",
+            ),
+        ],
+        projects=[],
+    )
+
+    result = aa._attach_certification_requirements(suggestions, references)
+
+    assert result.certifications[0].name == "AWS Certified Cloud Practitioner"
+    assert result.certifications[0].verified_requirements.startswith(
+        "The issuer describes this as a starting point"
+    )
+    assert str(result.certifications[0].official_source_url).startswith("https://aws.amazon.com/")
+    assert result.certifications[0].requirements_checked_on == aa.CERTIFICATION_REQUIREMENTS_CHECKED_ON
+    assert result.certifications[1].verified_requirements is None
+    assert result.certifications[1].official_source_url is None
 
 
 def test_asi_one_falls_back_to_json_mode_when_schema_mode_is_rejected():

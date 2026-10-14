@@ -856,13 +856,16 @@ def _reject_links(*values: str) -> None:
 
 
 class GuidanceRequest(StrictModel):
-    """Role-readiness guidance request, independent of any job listing."""
+    """Role-readiness guidance with optional signals from retrieved job listings."""
 
     candidate: CandidateProfile
     evidence_profile: EvidenceProfileResult
     # Short candidate-supplied summaries of their own projects (self-reported).
     project_notes: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]] = (
         Field(default_factory=list, max_length=10)
+    )
+    job_market_context: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]] = (
+        Field(default_factory=list, max_length=20)
     )
 
     @model_validator(mode="after")
@@ -915,6 +918,9 @@ class CertificationSuggestion(StrictModel):
     name: NonEmptyStr = Field(max_length=120)
     issuer: NonEmptyStr | None = Field(default=None, max_length=80)
     why_relevant: NonEmptyStr = Field(max_length=400)
+    verified_requirements: NonEmptyStr | None = Field(default=None, max_length=800)
+    official_source_url: HttpUrl | None = None
+    requirements_checked_on: date | None = None
 
     @model_validator(mode="after")
     def _no_links(self) -> "CertificationSuggestion":
@@ -939,6 +945,7 @@ class GuidanceResult(StrictModel):
     target_role: NonEmptyStr
     guidance_source: Literal["model_generated_unverified"] = "model_generated_unverified"
     verified_against_job_listings: Literal[False] = False
+    job_market_context_used: bool = False
     skills: list[SkillGuidance] = Field(max_length=6)
     certifications: list[CertificationSuggestion] = Field(default_factory=list, max_length=4)
     suggested_projects: list[ProjectSuggestion] = Field(default_factory=list, max_length=4)
@@ -1164,12 +1171,20 @@ class CandidateWorkflowResult(StrictModel):
 AGENT_NAME = "skillbridge_conversational_orchestrator"
 ASI1_DEFAULT_BASE_URL = "https://api.asi1.ai/v1"
 ASI1_DEFAULT_MODEL = "asi1"
-ASI_TIMEOUT_SECONDS = 20
+HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
+ASI_TIMEOUT_SECONDS = 60.0
 ASI_MAX_ATTEMPTS = 3
 AGENT_TIMEOUT_SECONDS = 30
-OPPORTUNITY_TIMEOUT_SECONDS = 75  # probe 15s + fetch 20s + bounded 8s LLM budget, with slack for slow networks
+OPPORTUNITY_TIMEOUT_SECONDS = 75  # bounded hosted-agent response wait; provider reads use inactivity timeouts
 AGENT_MAX_ATTEMPTS = 1
-GUIDANCE_TIMEOUT_SECONDS = 25
+GUIDANCE_TIMEOUT_SECONDS = 200  # covers 3 x 60s provider attempts plus transport slack
+
+
+def _http_timeout(read_idle_seconds: float) -> tuple[float, float]:
+    """Bound connection setup and response inactivity, without a total transfer deadline."""
+    return min(HTTP_CONNECT_TIMEOUT_SECONDS, read_idle_seconds), read_idle_seconds
+
+
 REQUIRED_INTAKE = (
     ("target_role", "the role you are targeting"),
     ("country", "the country where you want to search"),
@@ -1361,7 +1376,7 @@ def _extract_chat_intake(text: str, candidate_id: str | None = None) -> ChatInta
                 url,
                 headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
                 json=payload,
-                timeout=ASI_TIMEOUT_SECONDS,
+                timeout=_http_timeout(ASI_TIMEOUT_SECONDS),
             )
             if (getattr(response, "status_code", 200) in {400, 422}
                     and payload["response_format"]["type"] == "json_schema"):
@@ -1437,10 +1452,11 @@ def _address_config() -> dict[AgentName, str]:
 
 
 async def _call_agent(ctx, address, request, expected_sender, expected_type,
-                      timeout=AGENT_TIMEOUT_SECONDS):
+                      timeout=AGENT_TIMEOUT_SECONDS, max_attempts=AGENT_MAX_ATTEMPTS,
+                      retry_timeouts=True):
     wire = request_to_message(request)
     last_error = None
-    for attempt in range(1, AGENT_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             reply, status = await asyncio.wait_for(
                 ctx.send_and_receive(
@@ -1464,6 +1480,8 @@ async def _call_agent(ctx, address, request, expected_sender, expected_type,
             return response
         except asyncio.TimeoutError as error:
             last_error = error
+            if not retry_timeouts:
+                break
         except (RuntimeError, OSError) as error:
             last_error = error
         except (ValidationError, ValueError) as error:
@@ -1471,7 +1489,7 @@ async def _call_agent(ctx, address, request, expected_sender, expected_type,
         log_event("agent_retry", logging.WARNING, agent=expected_sender.value,
                   request_id=request.request_id, attempt=attempt,
                   error=type(last_error).__name__)
-        if attempt < AGENT_MAX_ATTEMPTS:
+        if attempt < max_attempts:
             await asyncio.sleep(0.15 * attempt)
     raise RuntimeError(f"{expected_sender.value} did not respond ({type(last_error).__name__})")
 
@@ -1542,17 +1560,39 @@ def _validate_action(result: ActionPlanResult, candidate_id, opportunities, evid
             raise ValueError("action plan cited evidence not in the validated evidence profile")
 
 
-async def _request_guidance(ctx, addresses, request_id, candidate, evidence_profile, project_notes):
-    """Ask the Career Action Agent for unverified skill guidance when no jobs exist."""
+def _guidance_job_signals(opportunities) -> list[str]:
+    signals = []
+    if opportunities is None:
+        return signals
+    for record in opportunities.records[:10]:
+        required = [item.skill for item in (record.job.required_skills or [])]
+        preferred = [item.skill for item in (record.job.preferred_skills or [])]
+        if required or preferred:
+            signal = f"{record.job.title}:"
+            if required:
+                signal += " listed required skills: " + ", ".join(required[:8]) + "."
+            if preferred:
+                signal += " listed preferred skills: " + ", ".join(preferred[:8]) + "."
+            signals.append(signal[:400])
+    return signals
+
+
+async def _request_guidance(
+    ctx, addresses, request_id, candidate, evidence_profile, project_notes, opportunities=None,
+):
+    """Ask the Career Action Agent for unverified role guidance and optional job-market signals."""
+    job_market_context = _guidance_job_signals(opportunities)
     request = _make_request(
         request_id + ":career-guidance", AgentName.CAREER_ACTION, CAREER_GUIDANCE_MESSAGE,
         GuidanceRequest(candidate=candidate, evidence_profile=evidence_profile,
-                        project_notes=project_notes).model_dump(mode="json"),
+                        project_notes=project_notes,
+                        job_market_context=job_market_context).model_dump(mode="json"),
     )
     try:
         reply = await _call_agent(
             ctx, addresses[AgentName.CAREER_ACTION], request, AgentName.CAREER_ACTION,
             CAREER_GUIDANCE_RESULT_MESSAGE, timeout=GUIDANCE_TIMEOUT_SECONDS,
+            max_attempts=2, retry_timeouts=False,
         )
         guidance = _response_payload(reply, GuidanceResult)
         if guidance.candidate_id != candidate.candidate_id:
@@ -1658,7 +1698,7 @@ async def _run_workflow(ctx, sender, state: ConversationState) -> CandidateWorkf
     _validate_evidence(evidence_profile, candidate_id, workflow_request)
     if not opportunities.records:
         guidance, guidance_note = await _request_guidance(
-            ctx, addresses, request_id, candidate, evidence_profile, project_notes)
+            ctx, addresses, request_id, candidate, evidence_profile, project_notes, opportunities)
         return CandidateWorkflowResult(
             request_id=request_id,
             workflow_status=WorkflowStatus.PARTIAL,
@@ -1691,7 +1731,9 @@ async def _run_workflow(ctx, sender, state: ConversationState) -> CandidateWorkf
             ctx, addresses[AgentName.CAREER_ACTION], action_request,
             AgentName.CAREER_ACTION, CAREER_ACTION_RESULT_MESSAGE,
         ),
-        _request_guidance(ctx, addresses, request_id, candidate, evidence_profile, project_notes),
+        _request_guidance(
+            ctx, addresses, request_id, candidate, evidence_profile, project_notes, opportunities,
+        ),
     )
     plan = _response_payload(action_reply, ActionPlanResult)
     _validate_action(plan, candidate_id, opportunities, evidence_profile)
@@ -1724,7 +1766,7 @@ def _ask_for_missing(missing: list[str]) -> str:
     )
 
 
-CONVERSE_TIMEOUT_SECONDS = 15
+CONVERSE_TIMEOUT_SECONDS = ASI_TIMEOUT_SECONDS
 CONVERSE_SYSTEM = (
     "You are SkillBridge, a warm, clear and natural-sounding career assistant for students and fresh "
     "graduates, chatting like a thoughtful human mentor. Write 1-4 short sentences in plain, "
@@ -1762,7 +1804,7 @@ def _converse(situation: str, facts: dict, fallback: str) -> str:
                         {"situation": situation, "facts": facts}, ensure_ascii=False)},
                 ],
             },
-            timeout=CONVERSE_TIMEOUT_SECONDS,
+            timeout=_http_timeout(CONVERSE_TIMEOUT_SECONDS),
         )
         if response.status_code >= 400:
             log_event("converse_failed", logging.WARNING, status=response.status_code,
@@ -1843,10 +1885,12 @@ def _has_new_information(delta: ChatIntakeDelta) -> bool:
 def _format_guidance(guidance) -> list[str]:
     if guidance is None:
         return ["\nI couldn't produce skill, certification and project guidance right now; please try again shortly."]
-    lines = [
-        f"\nGuidance for {guidance.target_role} (AI-generated for the role in general: NOT from job "
-        "listings, not verified, no hiring claims):"
-    ]
+    basis = (
+        "AI-generated using returned job-listing skill signals; listings and guidance are not verified"
+        if guidance.job_market_context_used else
+        "AI-generated for the role in general: NOT from job listings and not verified"
+    )
+    lines = [f"\nGuidance for {guidance.target_role} ({basis}; no hiring claims):"]
     for number, item in enumerate(guidance.skills, 1):
         lines.append(
             f"\n{number}. {item.skill} — your evidence: {item.current_status.replace('_', ' ')}\n"
@@ -1854,11 +1898,26 @@ def _format_guidance(guidance) -> list[str]:
             f"Done when: {item.completion_criteria}"
         )
     if guidance.certifications:
-        lines.append("\nCertifications commonly recognised for this role (not employer requirements; "
-                     "confirm current details with the issuer):")
+        lines.append("\nCertification ideas (not employer requirements):")
         for item in guidance.certifications:
             issuer = f" ({item.issuer})" if item.issuer else ""
             lines.append(f"- {item.name}{issuer}: {item.why_relevant}")
+            if item.verified_requirements and item.official_source_url:
+                lines.append(
+                    f"  Issuer details checked {item.requirements_checked_on}: "
+                    f"{item.verified_requirements}\n"
+                    f"  Official source: {item.official_source_url}"
+                )
+            elif item.official_source_url:
+                lines.append(
+                    "  No current requirements are cached for this credential. Check the issuer's "
+                    f"official page before enrolling: {item.official_source_url}"
+                )
+            else:
+                lines.append(
+                    "  Current requirements were not verified from the issuer; check its official page "
+                    "for prerequisites, exam scope/version, fees, and renewal rules before enrolling."
+                )
     if guidance.suggested_projects:
         lines.append("\nProject ideas:")
         for item in guidance.suggested_projects:

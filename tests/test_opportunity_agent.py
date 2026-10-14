@@ -3,8 +3,11 @@
 import json
 import subprocess
 import sys
+import threading
+import time
 import textwrap
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
@@ -27,6 +30,45 @@ from tests.conftest import NOW
 
 NO_SLEEP = lambda _seconds: None  # noqa: E731
 CLOCK = lambda: NOW  # noqa: E731
+
+
+@pytest.mark.parametrize("path,delays,expected", [
+    ("/active", [0.15, 0.15], [0]),
+    ("/idle", [0.4], None),
+])
+def test_http_read_timeout_resets_on_response_data(path, delays, expected):
+    idle_timeout = 0.25
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            chunks = [b"[", b"0", b"]"] if self.path == "/active" else [b"[", b"]"]
+            self.send_response(200)
+            self.send_header("Content-Length", str(sum(map(len, chunks))))
+            self.end_headers()
+            try:
+                for index, chunk in enumerate(chunks):
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    if index < len(delays):
+                        time.sleep(delays[index])
+            except OSError:
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}{path}"
+        try:
+            if expected is None:
+                with pytest.raises(requests.RequestException, match="timed out"):
+                    requests.get(url, timeout=oa._http_timeout(idle_timeout))
+            else:
+                response = requests.get(url, timeout=oa._http_timeout(idle_timeout))
+                assert response.json() == expected
+        finally:
+            server.shutdown()
 
 
 def make_query(**overrides) -> OpportunitySearchRequest:
@@ -462,7 +504,9 @@ def test_remotive_maps_response_with_provenance_and_no_invented_fields():
     source, calls = remotive(lambda: FakeResponse(body=remotive_body(remotive_job())))
     result = run([source])
     url, headers, timeout = calls[0]
-    assert url == "https://remotive.com/api/remote-jobs" and timeout == oa.PROBE_TIMEOUT_SECONDS and "Authorization" not in headers
+    assert url == "https://remotive.com/api/remote-jobs"
+    assert timeout == oa._http_timeout(oa.PROBE_TIMEOUT_SECONDS)
+    assert "Authorization" not in headers
     (record,) = result.records
     job = record.job
     assert job.source_id == "remotive" and job.job_id == "remotive:1680495" and record.source_kind == SourceKind.LIVE
@@ -772,7 +816,8 @@ def test_asi_one_request_shape_and_reply_parsing():
     client, calls = asi_post(lambda: completion("{}"))
     assert client.extract("desc") == "{}"
     url, headers, payload, timeout = calls[0]
-    assert url == "https://api.asi1.ai/v1/chat/completions" and timeout == 8.0
+    assert url == "https://api.asi1.ai/v1/chat/completions"
+    assert timeout == oa._http_timeout(oa.HTTP_READ_IDLE_TIMEOUT_SECONDS)
     assert headers["Authorization"] == "Bearer " + "asi-key-secret"
     assert payload["model"] == "asi1" and payload["max_tokens"] == oa.LLM_MAX_TOKENS
     fmt = payload["response_format"]

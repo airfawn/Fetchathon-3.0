@@ -876,13 +876,16 @@ def _reject_links(*values: str) -> None:
 
 
 class GuidanceRequest(StrictModel):
-    """Role-readiness guidance request, independent of any job listing."""
+    """Role-readiness guidance with optional signals from retrieved job listings."""
 
     candidate: CandidateProfile
     evidence_profile: EvidenceProfileResult
     # Short candidate-supplied summaries of their own projects (self-reported).
     project_notes: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]] = (
         Field(default_factory=list, max_length=10)
+    )
+    job_market_context: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]] = (
+        Field(default_factory=list, max_length=20)
     )
 
     @model_validator(mode="after")
@@ -935,6 +938,9 @@ class CertificationSuggestion(StrictModel):
     name: NonEmptyStr = Field(max_length=120)
     issuer: NonEmptyStr | None = Field(default=None, max_length=80)
     why_relevant: NonEmptyStr = Field(max_length=400)
+    verified_requirements: NonEmptyStr | None = Field(default=None, max_length=800)
+    official_source_url: HttpUrl | None = None
+    requirements_checked_on: date | None = None
 
     @model_validator(mode="after")
     def _no_links(self) -> "CertificationSuggestion":
@@ -959,6 +965,7 @@ class GuidanceResult(StrictModel):
     target_role: NonEmptyStr
     guidance_source: Literal["model_generated_unverified"] = "model_generated_unverified"
     verified_against_job_listings: Literal[False] = False
+    job_market_context_used: bool = False
     skills: list[SkillGuidance] = Field(max_length=6)
     certifications: list[CertificationSuggestion] = Field(default_factory=list, max_length=4)
     suggested_projects: list[ProjectSuggestion] = Field(default_factory=list, max_length=4)

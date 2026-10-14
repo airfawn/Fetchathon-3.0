@@ -53,6 +53,11 @@ Configure the Opportunity Agent separately with `JOB_SOURCE=remotive` for live
 job data, or `SKILLBRIDGE_USE_FIXTURES=1` for clearly labeled development
 fixtures. The orchestrator never substitutes fixtures.
 
+Provider HTTP calls default to a 10-second connection timeout and a 60-second
+response data idle timeout. The idle timer applies between incoming data reads,
+not to the total response duration, so a slow but active transfer can continue;
+a response that stops sending data times out after 60 seconds.
+
 ## Agentverse conversational orchestrator
 
 Deploy `agents/orchestrator_agent.py` as a fourth hosted uAgent (the coordinator,
@@ -81,3 +86,18 @@ must be distinct valid uAgents addresses and refer to deployed, reachable agents
 Configure the Opportunity agent itself with `JOB_SOURCE=remotive` for live jobs;
 configure each hosted agent's own seed through its deployment settings, never in
 source code. No API key is required for Remotive.
+
+Career guidance can use a compact summary of required and preferred skills from
+up to ten validated job listings, so suggestions can reflect custom roles
+returned by Remotive without forwarding entire job descriptions. This is a
+market signal, not proof that a certification is required by an employer.
+
+Certification suggestions are restricted to credentials relevant to the role
+and to the issuer-reference catalog in `agents/action_agent.py`. The catalog
+contains reviewed requirement summaries for selected CompTIA, AWS, Google
+Cloud, and Microsoft credentials; entries without a reviewed summary link to the
+official issuer page and are explicitly labeled as not verified. The summaries
+are snapshots, not a live issuer feed: review `CERTIFICATION_REQUIREMENTS_CHECKED_ON`
+and refresh them against the linked issuer pages before deployment updates.
+Identical guidance requests are cached in-process for one hour, scoped by model,
+role, location, candidate context, job signals, and requested topics.

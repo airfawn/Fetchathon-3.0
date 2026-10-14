@@ -174,7 +174,7 @@ def test_hosted_workflow_validates_and_routes_through_all_three_agents(monkeypat
     monkeypatch.setattr(coordinator, "_address_config", lambda: addresses)
     calls = []
 
-    async def reply(_ctx, _address, request, expected_sender, expected_type, timeout=None):
+    async def reply(_ctx, _address, request, expected_sender, expected_type, **_kwargs):
         calls.append((expected_sender, request.message_type))
         if request.message_type == coordinator.CAREER_GUIDANCE_MESSAGE:
             raise RuntimeError("guidance unavailable")
@@ -237,7 +237,7 @@ def test_asi_intake_validates_structured_response_without_live_network(monkeypat
 
     assert result.country == "US"
     assert captured["url"] == "https://api.asi1.ai/v1/chat/completions"
-    assert captured["timeout"] == coordinator.ASI_TIMEOUT_SECONDS
+    assert captured["timeout"] == coordinator._http_timeout(coordinator.ASI_TIMEOUT_SECONDS)
     assert "candidate-test" in captured["json"]["messages"][0]["content"]
 
 
@@ -278,9 +278,10 @@ class FakeGuidanceClient:
     def role_advice(self, _request):
         return self.role_guidance(None, None)
 
-    def role_guidance(self, candidate, evidence_profile, project_notes=()):
+    def role_guidance(self, candidate, evidence_profile, project_notes=(), job_market_context=()):
         make = action_agent.ASISkillSuggestion
         self.project_notes = list(project_notes)
+        self.job_market_context = list(job_market_context)
         return action_agent.ASISkillSuggestions(
             certifications=[action_agent.CertificationSuggestion(
                 name="CompTIA Security+", issuer="CompTIA", why_relevant="Common entry-level SOC credential.")],
@@ -305,7 +306,7 @@ def _empty_workflow(monkeypatch, guidance_ok, extra=None):
     monkeypatch.setattr(action_agent, "ASIOneClient", FakeGuidanceClient)
     calls = []
 
-    async def reply(_ctx, _address, request, expected_sender, expected_type, timeout=None):
+    async def reply(_ctx, _address, request, expected_sender, expected_type, **_kwargs):
         calls.append(request.message_type)
         if expected_sender == coordinator.AgentName.OPPORTUNITY_INTELLIGENCE:
             payload = opportunity_result(records=[]).model_dump(mode="json")
@@ -345,6 +346,8 @@ def test_no_jobs_returns_labeled_guidance_from_career_action_agent(monkeypatch):
     text = coordinator._format_workflow(result)
     assert "NOT from job" in text and "Incident Response" in text
     assert "CompTIA Security+" in text and "Home SIEM lab" in text and "not employer requirements" in text
+    assert "comptia.org/en-us/certifications/security" in text
+    assert "No current requirements are cached" in text
 
 
 def test_no_jobs_and_guidance_failure_is_reported_not_invented(monkeypatch):
@@ -353,6 +356,110 @@ def test_no_jobs_and_guidance_failure_is_reported_not_invented(monkeypatch):
     assert result.guidance is None
     assert result.action_stage.status == coordinator.StageStatus.SKIPPED
     assert "couldn't produce skill, certification and project guidance" in coordinator._format_workflow(result)
+
+
+def test_guidance_timeout_covers_action_agent_provider_retries():
+    assert coordinator.GUIDANCE_TIMEOUT_SECONDS > (
+        action_agent.ASI_TIMEOUT_SECONDS * action_agent.ASI_MAX_ATTEMPTS
+    )
+
+
+def test_guidance_uses_skills_from_returned_custom_job_records():
+    opportunities = opportunity_result()
+    signals = coordinator._guidance_job_signals(opportunities)
+
+    assert signals
+    assert opportunities.records[0].job.title in signals[0]
+    requirement = opportunities.records[0].job.required_skills
+    if requirement:
+        assert requirement[0].skill in signals[0]
+
+
+def test_guidance_request_forwards_compact_job_signals_to_career_action(monkeypatch):
+    candidate = coordinator.CandidateProfile(
+        candidate_id="candidate-guidance",
+        target_role="SOC Analyst",
+        preferred_location="India",
+        experience_level=ExperienceLevel.ENTRY_LEVEL,
+        learning_hours_per_week=5,
+        claimed_skills=["SIEM"],
+    )
+    evidence = coordinator.EvidenceProfileResult(
+        candidate_id=candidate.candidate_id,
+        as_of=coordinator._now(),
+        skills=[],
+    )
+    opportunities = opportunity_result()
+    captured = {}
+
+    async def reply(_ctx, _address, request, expected_sender, expected_type, **_kwargs):
+        captured.update(request=request)
+        guidance = coordinator.GuidanceResult(
+            candidate_id=candidate.candidate_id,
+            target_role=candidate.target_role,
+            skills=[],
+            job_market_context_used=True,
+        )
+        return coordinator.AgentResponse(
+            request_id=request.request_id,
+            sender=expected_sender,
+            recipient=coordinator.AgentName.ORCHESTRATOR,
+            message_type=expected_type,
+            created_at=request.created_at,
+            status="success",
+            payload=guidance.model_dump(mode="json"),
+        )
+
+    monkeypatch.setattr(coordinator, "_call_agent", reply)
+    addresses = {coordinator.AgentName.CAREER_ACTION: "action-address"}
+    guidance, _note = run_async(coordinator._request_guidance(
+        FakeContext(), addresses, "request-guidance", candidate, evidence, [], opportunities,
+    ))
+
+    forwarded = captured["request"].payload["job_market_context"]
+    assert forwarded == coordinator._guidance_job_signals(opportunities)
+    assert guidance.job_market_context_used is True
+
+
+def test_guidance_agent_delivery_retries_transient_transport_error():
+    request = coordinator._make_request(
+        "request-1", coordinator.AgentName.CAREER_ACTION,
+        coordinator.CAREER_GUIDANCE_MESSAGE, {},
+    )
+    expected = coordinator.AgentResponse(
+        request_id=request.request_id,
+        sender=coordinator.AgentName.CAREER_ACTION,
+        recipient=coordinator.AgentName.ORCHESTRATOR,
+        message_type=coordinator.CAREER_GUIDANCE_RESULT_MESSAGE,
+        created_at=request.created_at,
+        status="success",
+        payload={},
+    )
+
+    class RetryContext:
+        calls = 0
+
+        async def send_and_receive(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("temporary delivery failure")
+            return (
+                coordinator.response_to_message(expected),
+                SimpleNamespace(status=coordinator.DeliveryStatus.DELIVERED, detail=None),
+            )
+
+    context = RetryContext()
+    response = run_async(coordinator._call_agent(
+        context, "action-address", request,
+        coordinator.AgentName.CAREER_ACTION,
+        coordinator.CAREER_GUIDANCE_RESULT_MESSAGE,
+        timeout=coordinator.GUIDANCE_TIMEOUT_SECONDS,
+        max_attempts=2,
+        retry_timeouts=False,
+    ))
+
+    assert response.request_id == request.request_id
+    assert context.calls == 2
 
 
 def test_guidance_without_asi_key_returns_error_response(monkeypatch):
@@ -478,7 +585,7 @@ def _advice_setup(monkeypatch, ask_delta, fail=False):
     monkeypatch.setattr(action_agent, "ASIOneClient", FakeGuidanceClient)
     seen = []
 
-    async def reply(_ctx, _address, request, expected_sender, expected_type, timeout=None):
+    async def reply(_ctx, _address, request, expected_sender, expected_type, **_kwargs):
         seen.append(request)
         if fail:
             raise RuntimeError("career action agent did not respond")

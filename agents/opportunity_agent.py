@@ -63,6 +63,7 @@ from typing import Literal, Protocol
 from uuid import uuid4
 
 import requests
+
 from pydantic import ValidationError
 import uagents
 from uagents import Agent, Context
@@ -665,6 +666,16 @@ def message_to_response(message: AgentResponseMessage) -> AgentResponse:
     return AgentResponse.model_validate(_as_dict(message))
 # END GENERATED SKILLBRIDGE MODELS
 
+
+HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
+HTTP_READ_IDLE_TIMEOUT_SECONDS = 60.0
+
+
+def _http_timeout(read_idle_seconds: float) -> tuple[float, float]:
+    """Bound connection setup and response inactivity, without a total transfer deadline."""
+    return min(HTTP_CONNECT_TIMEOUT_SECONDS, read_idle_seconds), read_idle_seconds
+
+
 AGENT_NAME = "skillbridge_opportunity_intelligence"
 logger = logging.getLogger(AGENT_NAME)
 
@@ -725,7 +736,7 @@ class JobSource(Protocol):
 @dataclass(frozen=True)
 class RetryPolicy:
     max_attempts: int = 3
-    timeout_seconds: float = 20.0
+    timeout_seconds: float = HTTP_READ_IDLE_TIMEOUT_SECONDS
     backoff_seconds: float = 0.5
 
 
@@ -853,7 +864,7 @@ class RemotiveSource:
         if self._cached and now - self._cached[0] < self.cache_seconds:
             return self._cached[1]
         body = request_json(lambda: self._http_get(
-            self.url, headers={"Accept": "application/json"}, timeout=timeout))
+            self.url, headers={"Accept": "application/json"}, timeout=_http_timeout(timeout)))
         jobs = body.get("jobs") if isinstance(body, dict) else None
         if not isinstance(jobs, list):
             raise ExternalCallError("invalid_response", "missing 'jobs' list")
@@ -1287,7 +1298,8 @@ class ASIOneClient:
 
     def __init__(self, api_key: str, base_url: str | None = None, model: str = ASI1_DEFAULT_MODEL,
                  http_post: Callable = requests.post,
-                 policy: RetryPolicy = RetryPolicy(max_attempts=1, timeout_seconds=8.0),
+                 policy: RetryPolicy = RetryPolicy(
+                     max_attempts=1, timeout_seconds=HTTP_READ_IDLE_TIMEOUT_SECONDS),
                  sleep: Callable = time.sleep) -> None:
         if not api_key:
             raise ValueError("an ASI:One API key is required")
@@ -1329,7 +1341,8 @@ class ASIOneClient:
         headers = {"Authorization": "Bearer " + self._api_key, "Content-Type": "application/json"}
         body, _ = call_with_retries(
             lambda: request_json(lambda: self._http_post(
-                self.url, headers=headers, json=payload, timeout=self._policy.timeout_seconds)),
+                self.url, headers=headers, json=payload,
+                timeout=_http_timeout(self._policy.timeout_seconds))),
             self._policy, self._sleep,
         )
         try:
@@ -1708,7 +1721,7 @@ def deduplicate(records: list[OpportunityRecord]) -> tuple[list[OpportunityRecor
 # ------------------------------------------------------------- search workflow
 
 
-PROBE_TIMEOUT_SECONDS = 15.0
+PROBE_TIMEOUT_SECONDS = HTTP_READ_IDLE_TIMEOUT_SECONDS
 UNREACHABLE_CODES = ("timeout", "connection_error")
 
 
