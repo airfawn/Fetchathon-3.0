@@ -725,7 +725,7 @@ class JobSource(Protocol):
 @dataclass(frozen=True)
 class RetryPolicy:
     max_attempts: int = 3
-    timeout_seconds: float = 10.0
+    timeout_seconds: float = 20.0
     backoff_seconds: float = 0.5
 
 
@@ -1708,7 +1708,7 @@ def deduplicate(records: list[OpportunityRecord]) -> tuple[list[OpportunityRecor
 # ------------------------------------------------------------- search workflow
 
 
-PROBE_TIMEOUT_SECONDS = 5.0
+PROBE_TIMEOUT_SECONDS = 15.0
 UNREACHABLE_CODES = ("timeout", "connection_error")
 
 
